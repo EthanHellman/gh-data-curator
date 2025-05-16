@@ -8,6 +8,7 @@ the necessary output directory.
 import json
 import logging
 import os
+import argparse
 from pathlib import Path
 
 # Configure logging
@@ -24,6 +25,20 @@ from dataflow.filtering.content_relevance_filter import ContentRelevanceFilter
 from dataflow.filtering.filtering_pipeline import FilterPipeline
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run filtering pipeline on existing PR data")
+    parser.add_argument("--openai", action="store_true", help="Use OpenAI API for relevant files prediction")
+    parser.add_argument("--no-import-analysis", action="store_true", help="Disable import analysis for finding related files")
+    args = parser.parse_args()
+    
+    # Log command line arguments - add this for debugging
+    logger.info(f"Command line arguments: openai={args.openai}, no_import_analysis={args.no_import_analysis}")
+    
+    # Check for OpenAI API key if requested
+    if args.openai and not os.environ.get("OPENAI_API_KEY"):
+        logger.error("OpenAI API key not found. Please set OPENAI_API_KEY environment variable.")
+        return
+        
     # Define paths based on your existing structure
     base_dir = Path("~/gh-data-curator/data").expanduser()
     processed_dir = base_dir / "processed" / "django_django"
@@ -93,9 +108,14 @@ def main():
     # Now run the full pipeline
     logger.info("\n===== RUNNING FULL FILTERING PIPELINE =====")
     
-    # Create a FilterPipeline instance
-    # Note: This expects a specific directory structure
-    pipeline = FilterPipeline(base_dir)
+    # Create a FilterPipeline instance with optional features
+    # Make sure to explicitly log the values we're passing
+    logger.info(f"Creating FilterPipeline with use_openai={args.openai}, use_import_analysis={not args.no_import_analysis}")
+    pipeline = FilterPipeline(
+        base_dir, 
+        use_openai=args.openai,
+        use_import_analysis=not args.no_import_analysis
+    )
     
     # Run the filtering pipeline
     output_dir = pipeline.filter_repository("django", "django")
@@ -113,6 +133,9 @@ def main():
             logger.info(f"PRs passing all filters: {len(filtered_prs)}")
             for pr in filtered_prs:
                 logger.info(f"- PR #{pr['pr_number']}: {pr.get('title', '')}")
+                relevant_files = pr.get('relevant_files', [])
+                if relevant_files:
+                    logger.info(f"  Relevant files: {relevant_files}")
         else:
             logger.warning(f"Filtered index not found at {filtered_index_path}")
     else:

@@ -47,6 +47,8 @@ class FilterPipeline:
     
     def filter_repository(self, owner: str, repo: str) -> Path:
         """Filter all processed PRs for a repository."""
+        logger.info(f"DEBUG: Initializing relevant files predictor with use_openai={self.use_openai}")
+
         repo_dir = self.processed_dir / f"{owner}_{repo}"
         if not repo_dir.exists():
             logger.error(f"Processed repository data not found: {repo_dir}")

@@ -67,6 +67,8 @@ class RelevantFilesPredictor:
         Returns:
             List of file paths that are related but weren't changed
         """
+        logger.info(f"DEBUG: predict_relevant_files called with use_openai={self.use_openai}, has_api_key={bool(self.openai_api_key)}")
+        
         changed_files = self._get_changed_files(pr_data)
         
         if not changed_files:

@@ -30,23 +30,38 @@ class RelatedFilePredictor:
         if not changed_files:
             return []
         
+        # Normalize paths to make sure they're all relative to repo_path
+        normalized_changed_files = []
+        for file_path in changed_files:
+            try:
+                # If it's an absolute path, make it relative to repo_path
+                if os.path.isabs(file_path):
+                    rel_path = os.path.relpath(file_path, self.repo_path)
+                    normalized_changed_files.append(rel_path)
+                else:
+                    # Keep relative paths as they are
+                    normalized_changed_files.append(file_path)
+            except ValueError:
+                # If we can't relativize (e.g., different drives), just use the basename
+                normalized_changed_files.append(os.path.basename(file_path))
+        
         # Collect candidate files using various heuristics
         candidates = set()
         
         # 1. Files in the same directories
-        candidates.update(self._find_files_in_same_directories(changed_files))
+        candidates.update(self._find_files_in_same_directories(normalized_changed_files))
         
         # 2. Files with import relationships
-        candidates.update(self._find_import_relationships(changed_files))
+        candidates.update(self._find_import_relationships(normalized_changed_files))
         
         # 3. Files with naming similarities
-        candidates.update(self._find_naming_similarities(changed_files))
+        candidates.update(self._find_naming_similarities(normalized_changed_files))
         
         # Remove files that were already changed
-        candidates = candidates - set(changed_files)
+        candidates = candidates - set(normalized_changed_files)
         
         # Sort by relevance score and limit
-        scored_candidates = [(f, self._calculate_relevance(f, changed_files)) for f in candidates]
+        scored_candidates = [(f, self._calculate_relevance(f, normalized_changed_files)) for f in candidates]
         scored_candidates.sort(key=lambda x: x[1], reverse=True)
         
         return [f for f, score in scored_candidates[:limit]]
@@ -58,7 +73,9 @@ class RelatedFilePredictor:
         # Get unique directories from changed files
         directories = set()
         for file_path in changed_files:
-            directory = Path(file_path).parent
+            # Construct the full path correctly
+            full_path = self.repo_path / file_path
+            directory = full_path.parent
             if directory.exists():
                 directories.add(directory)
         
@@ -66,7 +83,9 @@ class RelatedFilePredictor:
         for directory in directories:
             for file_path in directory.glob("*.py"):
                 if file_path.is_file():
-                    related_files.add(str(file_path))
+                    # Convert back to relative path for consistency
+                    rel_path = file_path.relative_to(self.repo_path)
+                    related_files.add(str(rel_path))
         
         return related_files
     
@@ -83,7 +102,11 @@ class RelatedFilePredictor:
         
         # Search for imports of these modules in repo
         for py_file in self.repo_path.glob("**/*.py"):
-            if str(py_file) in changed_files:
+            # Convert to relative path for comparison
+            rel_py_file = py_file.relative_to(self.repo_path)
+            rel_path_str = str(rel_py_file)
+            
+            if rel_path_str in changed_files:
                 continue
                 
             with open(py_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -92,8 +115,8 @@ class RelatedFilePredictor:
                     
                     # Check if file imports any of the modules
                     for module in modules:
-                        if re.search(f"import\s+{module}|from\s+{module}\s+import", content):
-                            related_files.add(str(py_file))
+                        if re.search(f"import\\s+{module}|from\\s+{module}\\s+import", content):
+                            related_files.add(rel_path_str)
                             break
                 except Exception:
                     # Skip files that can't be read
@@ -114,7 +137,11 @@ class RelatedFilePredictor:
         
         # Search for files with similar names
         for py_file in self.repo_path.glob("**/*.py"):
-            if str(py_file) in changed_files:
+            # Convert to relative path for comparison
+            rel_py_file = py_file.relative_to(self.repo_path)
+            rel_path_str = str(rel_py_file)
+            
+            if rel_path_str in changed_files:
                 continue
                 
             file_name = py_file.stem
@@ -123,17 +150,17 @@ class RelatedFilePredictor:
             for base_name in base_names:
                 # Exact matches without extension
                 if file_name == base_name:
-                    related_files.add(str(py_file))
+                    related_files.add(rel_path_str)
                     continue
                     
                 # Test prefix is often associated with implementation
                 if file_name == f"test_{base_name}" or base_name == f"test_{file_name}":
-                    related_files.add(str(py_file))
+                    related_files.add(rel_path_str)
                     continue
                     
                 # Common patterns like util/utils, model/models
                 if file_name.startswith(f"{base_name}_") or base_name.startswith(f"{file_name}_"):
-                    related_files.add(str(py_file))
+                    related_files.add(rel_path_str)
                     continue
         
         return related_files
@@ -162,16 +189,23 @@ class RelatedFilePredictor:
         
         # Directory proximity
         for changed_file in changed_files:
-            common_path = os.path.commonpath([file_path, changed_file])
-            if common_path:
-                # More shared path components = higher score
-                common_parts = len(Path(common_path).parts)
-                file_parts = len(Path(file_path).parts)
-                proximity = common_parts / file_parts
-                score = max(score, 0.3 + (proximity * 0.7))  # Scale to 0.3-1.0
-        
-        # Import relationship (would require parsing)
-        # This would be a more complex analysis; simplified here
+            try:
+                # Make sure both paths are in the same format before comparing
+                path1 = str(Path(file_path))
+                path2 = str(Path(changed_file))
+                
+                # Get common path components
+                common_path = os.path.commonpath([path1, path2])
+                
+                if common_path:
+                    # More shared path components = higher score
+                    common_parts = len(Path(common_path).parts)
+                    file_parts = len(Path(file_path).parts)
+                    proximity = common_parts / file_parts
+                    score = max(score, 0.3 + (proximity * 0.7))  # Scale to 0.3-1.0
+            except ValueError:
+                # If paths can't be compared (e.g., different drives), skip
+                continue
         
         # Name similarity
         file_name = Path(file_path).stem
