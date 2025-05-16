@@ -1,10 +1,12 @@
+# src/dataflow/filtering/relevant_files_predictor.py
 import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Any
 import json
 import requests
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ class RelevantFilesPredictor:
             except Exception as e:
                 logger.error(f"[PR #{pr_number}] Error using OpenAI for prediction: {e}")
                 logger.info(f"[PR #{pr_number}] Falling back to other methods")
+                logger.debug(f"[PR #{pr_number}] Exception details: {traceback.format_exc()}")
         else:
             logger.info(f"[PR #{pr_number}] Skipping OpenAI prediction (not enabled or no API key)")
         
@@ -126,6 +129,7 @@ class RelevantFilesPredictor:
             except Exception as e:
                 logger.error(f"[PR #{pr_number}] Error using import analysis for prediction: {e}")
                 logger.info(f"[PR #{pr_number}] Falling back to basic heuristics")
+                logger.debug(f"[PR #{pr_number}] Exception details: {traceback.format_exc()}")
         else:
             reason = "disabled" if not self.use_import_analysis else "import analyzer not initialized"
             logger.info(f"[PR #{pr_number}] Skipping import analysis prediction ({reason})")
@@ -202,6 +206,17 @@ class RelevantFilesPredictor:
         logger.info(f"Starting batch prediction for {len(pr_data_list)} PRs")
         results = {}
         
+        # Pre-build the import graph if we're using import analysis and have a repository
+        if self.use_import_analysis and self.import_analyzer and self.repo_path and self.repo_path.exists():
+            try:
+                if not hasattr(self.import_analyzer, '_graph_built') or not self.import_analyzer._graph_built:
+                    logger.info(f"Building import graph for repository before batch prediction...")
+                    self.import_analyzer.build_import_graph()
+                    self.import_analyzer._graph_built = True
+                    logger.info(f"Import graph built successfully")
+            except Exception as e:
+                logger.error(f"Error building import graph: {e}")
+        
         if self.use_openai and self.openai_api_key:
             logger.info(f"Using ThreadPoolExecutor with {self.max_workers} workers for OpenAI batch prediction")
             # Use ThreadPoolExecutor for parallel API requests
@@ -219,6 +234,7 @@ class RelevantFilesPredictor:
                         logger.info(f"[PR #{pr_number}] Batch prediction completed successfully")
                     except Exception as e:
                         logger.error(f"[PR #{pr_number}] Error in batch prediction: {e}")
+                        logger.debug(f"[PR #{pr_number}] Exception details: {traceback.format_exc()}")
                         results[pr_number] = []
         else:
             logger.info("Using sequential processing for batch prediction")
@@ -269,8 +285,22 @@ class RelevantFilesPredictor:
         title = pr_data.get("title", "")
         body = pr_data.get("body", "")
         
-        # Generate import relationship context if available
+        # Generate context from various sources
         import_context = self._generate_import_context(pr_number, changed_files)
+        ast_context = self._generate_ast_summary(pr_number, changed_files)
+        repo_context = self._generate_repo_structure(pr_number)
+        
+        # Combine all context (but be mindful of token limits)
+        all_context = []
+        if import_context:
+            all_context.append(import_context)
+        if ast_context:
+            all_context.append(ast_context)
+        if repo_context:
+            all_context.append(repo_context)
+        
+        # Join all context with empty lines between sections
+        combined_context = "\n\n".join(all_context)
         
         prompt = f"""Given a GitHub pull request, predict which files are relevant to understanding the changes but were NOT modified.
 
@@ -282,9 +312,9 @@ PR Description:
 Files that were modified in this PR:
 {', '.join(changed_files)}
 
-{import_context}
+{combined_context}
 
-Based on the PR title, description, modified files, and code relationships, list up to {limit} files that are likely relevant to understanding these changes but were not modified.
+Based on the PR title, description, modified files, and code relationships described above, list up to {limit} files that are likely relevant to understanding these changes but were not modified.
 Return your answer as a JSON array of file paths, like this: ["path/to/file1.py", "path/to/file2.py"]
 """
         
@@ -343,6 +373,7 @@ Return your answer as a JSON array of file paths, like this: ["path/to/file1.py"
                 
         except Exception as e:
             logger.error(f"[PR #{pr_number}] Error calling OpenAI API: {e}")
+            logger.debug(f"[PR #{pr_number}] Exception details: {traceback.format_exc()}")
             return []
     
     def _generate_import_context(self, pr_number: str, changed_files: List[str]) -> str:
@@ -377,6 +408,166 @@ Return your answer as a JSON array of file paths, like this: ["path/to/file1.py"
         
         logger.info(f"[PR #{pr_number}] No import relationships found for context")
         return ""
+    
+    def _generate_ast_summary(self, pr_number: str, changed_files: List[str], max_files: int = 3) -> str:
+        """
+        Generate an AST-based summary of the changed files.
+        
+        Args:
+            pr_number: PR number for logging
+            changed_files: List of files that were changed in the PR
+            max_files: Maximum number of files to analyze
+            
+        Returns:
+            A string with the AST summary or empty string if not available
+        """
+        if not self.repo_path or not changed_files:
+            logger.info(f"[PR #{pr_number}] Cannot generate AST summary: no repo path or no changed files")
+            return ""
+        
+        try:
+            import ast
+            
+            logger.info(f"[PR #{pr_number}] Generating AST summary for up to {max_files} changed files")
+            
+            # Only process Python files
+            py_files = [f for f in changed_files if f.endswith('.py')][:max_files]
+            if not py_files:
+                logger.info(f"[PR #{pr_number}] No Python files to analyze in changed files")
+                return ""
+            
+            summaries = []
+            for file_path in py_files:
+                full_path = self.repo_path / file_path
+                if not full_path.exists():
+                    logger.warning(f"[PR #{pr_number}] File not found for AST analysis: {file_path}")
+                    continue
+                    
+                try:
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        code = f.read()
+                        
+                    tree = ast.parse(code)
+                    
+                    # Extract classes and functions
+                    classes = []
+                    functions = []
+                    imports = []
+                    
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ClassDef):
+                            # Collect methods for this class
+                            methods = []
+                            for item in node.body:
+                                if isinstance(item, ast.FunctionDef):
+                                    methods.append(item.name)
+                            
+                            if methods:
+                                classes.append(f"{node.name} (methods: {', '.join(methods[:5])}{'...' if len(methods) > 5 else ''})")
+                            else:
+                                classes.append(node.name)
+                        elif isinstance(node, ast.FunctionDef):
+                            # Check if this is a top-level function (not a method)
+                            # This is a bit tricky with ast, so we'll use a simpler approach
+                            if not any(isinstance(parent, ast.ClassDef) for parent in ast.walk(tree) if hasattr(parent, 'body') and node in parent.body):
+                                functions.append(node.name)
+                        elif isinstance(node, ast.Import):
+                            for name in node.names:
+                                imports.append(name.name)
+                        elif isinstance(node, ast.ImportFrom):
+                            if node.module:
+                                # Handle 'from x import y'
+                                module = node.module
+                                for name in node.names:
+                                    imports.append(f"{module}.{name.name}")
+                    
+                    summary = f"File: {file_path}\n"
+                    if imports:
+                        summary += f"  Imports: {', '.join(imports[:10])}{'...' if len(imports) > 10 else ''}\n"
+                    if classes:
+                        summary += f"  Classes: {', '.join(classes[:5])}{'...' if len(classes) > 5 else ''}\n"
+                    if functions:
+                        summary += f"  Functions: {', '.join(functions[:10])}{'...' if len(functions) > 10 else ''}\n"
+                        
+                    summaries.append(summary)
+                    logger.info(f"[PR #{pr_number}] Generated AST summary for {file_path}")
+                
+                except Exception as e:
+                    logger.error(f"[PR #{pr_number}] Error parsing {file_path}: {e}")
+                    logger.debug(f"[PR #{pr_number}] Traceback: {traceback.format_exc()}")
+            
+            if summaries:
+                ast_summary = "AST analysis of changed files:\n" + "\n".join(summaries)
+                logger.info(f"[PR #{pr_number}] Successfully generated AST summaries for {len(summaries)} files")
+                return ast_summary
+            
+            logger.info(f"[PR #{pr_number}] No AST summaries generated")
+            return ""
+        
+        except ImportError:
+            logger.warning(f"[PR #{pr_number}] AST module not available")
+            return ""
+        except Exception as e:
+            logger.error(f"[PR #{pr_number}] Error in AST analysis: {e}")
+            logger.debug(f"[PR #{pr_number}] Traceback: {traceback.format_exc()}")
+            return ""
+    
+    def _generate_repo_structure(self, pr_number: str) -> str:
+        """
+        Generate a summary of the repository structure.
+        
+        Args:
+            pr_number: PR number for logging
+            
+        Returns:
+            A string with the repository structure or empty string if not available
+        """
+        if not self.repo_path or not self.repo_path.exists():
+            logger.info(f"[PR #{pr_number}] Cannot generate repository structure: no valid repo path")
+            return ""
+        
+        try:
+            logger.info(f"[PR #{pr_number}] Generating repository structure summary")
+            
+            # Find Python packages (directories with __init__.py)
+            packages = set()
+            for init_file in self.repo_path.glob("**/__init__.py"):
+                package_dir = init_file.parent
+                try:
+                    # Get relative path to repository root
+                    package_path = package_dir.relative_to(self.repo_path)
+                    packages.add(str(package_path))
+                except ValueError:
+                    # Skip if not relative to repo_path
+                    continue
+            
+            # Get directory structure with file counts
+            dir_counts = {}
+            for pkg in sorted(packages):
+                pkg_path = self.repo_path / pkg
+                python_files = list(pkg_path.glob("*.py"))
+                dir_counts[pkg] = len(python_files)
+            
+            # Format the structure
+            lines = ["Repository structure:"]
+            
+            # Add top-level packages with file counts
+            for pkg, count in sorted(dir_counts.items(), key=lambda x: x[0]):
+                pkg_parts = pkg.split('/')
+                
+                # Only add top-level packages and their immediate children
+                if len(pkg_parts) <= 2:
+                    indent = "  " * (len(pkg_parts) - 1)
+                    lines.append(f"{indent}- {pkg_parts[-1]}: {count} Python files")
+            
+            structure = "\n".join(lines)
+            logger.info(f"[PR #{pr_number}] Generated repository structure summary with {len(dir_counts)} packages")
+            return structure
+        
+        except Exception as e:
+            logger.error(f"[PR #{pr_number}] Error generating repository structure: {e}")
+            logger.debug(f"[PR #{pr_number}] Traceback: {traceback.format_exc()}")
+            return ""
 
 if __name__ == "__main__":
     # Simple test
