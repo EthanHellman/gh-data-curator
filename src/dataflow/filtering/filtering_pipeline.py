@@ -22,13 +22,14 @@ class FilterPipeline:
     capturing metadata at each stage to enable quality assessment and analysis.
     """
     
-    def __init__(self, data_dir: Path, use_openai: bool = False):
+    def __init__(self, data_dir: Path, use_openai: bool = False, use_import_analysis: bool = True):
         self.data_dir = data_dir
         self.processed_dir = data_dir / "processed"
         self.filtered_dir = data_dir / "filtered"
         self.repos_dir = data_dir / "repos"
         self.filtered_dir.mkdir(exist_ok=True)
         self.use_openai = use_openai
+        self.use_import_analysis = use_import_analysis
         
         # Initialize filters
         self.bot_filter = BotFilter()
@@ -84,7 +85,8 @@ class FilterPipeline:
         if self.use_openai or repo_path:
             relevant_files_predictor = RelevantFilesPredictor(
                 repo_path=repo_path,
-                use_openai=self.use_openai
+                use_openai=self.use_openai,
+                use_import_analysis=self.use_import_analysis
             )
         
         # First pass: Apply filters and identify PRs that pass
