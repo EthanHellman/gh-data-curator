@@ -1,0 +1,33 @@
+== Quality Report for PR #19445 - django_django ==
+
+PR INFORMATION:
+Title: Fixed #33312 -- Raised explicit exception when copying deferred model instances.
+Author: charettes
+Created: 2025-05-06T19:12:40Z
+Merged: 2025-05-16T06:13:58Z
+
+QUALITY SCORES:
+Overall Quality Score: 1.00
+Bot Filter Score: 1.00
+Size Complexity Score: 0.99
+Content Relevance Score: 1.00
+
+SIZE METRICS:
+Files Changed: 5
+Code Files: 4
+Lines Added: 42
+Lines Deleted: 3
+Total Line Changes: 45
+
+CONTENT QUALITY INDICATORS:
+Problem-Solving Indicators: None detected
+
+RELEVANT FILES:
+- django/db/models/fields/composite.py
+- django/db/models/expressions.py
+- django/db/models/utils.py
+- tests/model_regress/test_state.py
+- django/contrib/contenttypes/fields.py
+
+OVERALL ASSESSMENT:
+Excellent quality PR with significant problem-solving content.
