@@ -1,8 +1,23 @@
-# src/dataflow/filtering/filter_pipeline.py
+# # src/dataflow/filtering/filter_pipeline.py
+# import logging
+# import re
+# from pathlib import Path
+# from typing import Dict, List, Any, Optional, Set, Tuple
+
+# logger = logging.getLogger(__name__)
+
+# src/dataflow/filtering/filtering_pipeline.py
+import json
 import logging
-import re
+import os
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
+
+# Import the filter components
+from src.dataflow.filtering.bot_filter import BotFilter
+from src.dataflow.filtering.size_complexity_filter import SizeComplexityFilter
+from src.dataflow.filtering.content_relevance_filter import ContentRelevanceFilter
+from src.dataflow.filtering.file_relationship import RelatedFilePredictor
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +131,43 @@ class FilterPipeline:
         logger.info(f"Filtering stats: {self.stats}")
         
         return output_dir
+
+    # This is an addition to the FilterPipeline class in filtering_pipeline.py
+
+    def find_related_files(self, pr_data: Dict, repo_path: Optional[Path] = None) -> Dict:
+        """Find files related to the changes in a PR."""
+        if not repo_path:
+            # Try to construct repo path from data directory
+            owner_repo = pr_data.get("repository", {}).get("full_name", "")
+            if owner_repo:
+                owner, repo = owner_repo.split("/")
+                repo_path = self.data_dir / "repos" / f"{owner}_{repo}"
+            else:
+                logger.warning("Unable to determine repository path for related file prediction")
+                return pr_data
+        
+        # Skip if repo path doesn't exist
+        if not repo_path.exists():
+            logger.warning(f"Repository path does not exist: {repo_path}")
+            return pr_data
+        
+        # Get changed files
+        changed_files = []
+        for file in pr_data.get("code_files", []):
+            filename = file.get("filename", "")
+            if filename:
+                changed_files.append(filename)
+        
+        # Find related files
+        related_file_predictor = RelatedFilePredictor(repo_path)
+        related_files = related_file_predictor.find_related_files(changed_files)
+        
+        # Add related files to PR data
+        pr_data["related_files"] = related_files
+        
+        return pr_data
     
-    def _apply_filters(self, pr_data: Dict) -> Tuple[bool, Dict]:
+    def _apply_filters(self, pr_data: Dict, repo_path: Optional[Path] = None) -> Tuple[bool, Dict]:
         """Apply all filters and generate metadata."""
         metadata = {
             "bot_filter": {
@@ -132,6 +182,7 @@ class FilterPipeline:
                 "passed": False,
                 "details": {}
             },
+            "related_files": [],
             "quality_score": 0.0
         }
         
@@ -161,6 +212,16 @@ class FilterPipeline:
         if not content_result:
             self.stats["content_filtered"] += 1
             return False, metadata
+        
+        # Find related files if PR passes filters
+        if repo_path:
+            related_file_predictor = RelatedFilePredictor(repo_path)
+            changed_files = [file.get("filename", "") for file in pr_data.get("code_files", [])]
+            related_files = related_file_predictor.find_related_files(changed_files)
+            metadata["related_files"] = related_files
+            
+            # Add related files to PR data for further processing
+            pr_data["related_files"] = related_files
         
         # Calculate overall quality score
         quality_score = self._calculate_quality_score(bot_metadata, size_metadata, content_metadata)
