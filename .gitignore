@@ -35,6 +35,7 @@ data/processed/
 *.pkl
 *.csv
 *.json
+data/repos/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
