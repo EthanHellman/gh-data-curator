@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Generate a comprehensive report on data curation filtering results.
@@ -385,9 +384,9 @@ class ReportGenerator:
         # Add a horizontal line under the title
         ax.axhline(y=0.92, xmin=0.1, xmax=0.9, color='#3498db', linewidth=2)
         
-        # Create a styled box for the summary metrics
+        # Create a styled box for the summary metrics (fix color property warning)
         box = plt.Rectangle((0.1, 0.65), 0.8, 0.22, fill=True, 
-                           color='#ecf0f1', alpha=0.7, transform=fig.transFigure,
+                           facecolor='#ecf0f1', alpha=0.7, transform=fig.transFigure,
                            edgecolor='#bdc3c7', linewidth=1)
         ax.add_patch(box)
         
@@ -513,6 +512,93 @@ class ReportGenerator:
         # Add a horizontal line under the title
         ax.axhline(y=0.92, xmin=0.1, xmax=0.9, color='#3498db', linewidth=2)
         
+        # Create a styled box for the explanation (fix color property warning)
+        box = plt.Rectangle((0.1, 0.6), 0.8, 0.22, fill=True, 
+                           facecolor='#e8f4f8', alpha=0.7, transform=fig.transFigure,
+                           edgecolor='#3498db', linewidth=1)
+        ax.add_patch(box)
+        
+        # Explanation text with improved formatting
+        explanation = [
+            "The following pages showcase high-quality PRs that passed all filtering stages.",
+            "These PRs represent exemplary software engineering data with meaningful",
+            "problem-solving content, appropriate size, and high relevance scores.",
+            "",
+            "Each scorecard provides detailed metrics on the PR's quality dimensions,",
+            "including file composition, code changes, and identified relevant files",
+            "that provide context for understanding the changes."
+        ]
+        
+        fig.text(0.15, 0.8, "\n".join(explanation), 
+                fontsize=12, va='top', color='#2c3e50', linespacing=1.5)
+        
+        # Add a preview of PR scorecards
+        y_pos = 0.5
+        for i, path in enumerate(scorecard_paths[:2]):
+            try:
+                # Extract PR info from filename
+                filename = path.name
+                repo_pr = filename.split('_scorecard')[0].replace('_', '/')
+                
+                # Create a mini-preview
+                thumb_height = 0.15
+                thumb_width = 0.3
+                thumb_img = mpimg.imread(str(path))
+                thumb_ax = fig.add_axes([0.35, y_pos - thumb_height/2, thumb_width, thumb_height])
+                thumb_ax.imshow(thumb_img)
+                thumb_ax.axis('off')
+                
+                # Add label
+                fig.text(0.2, y_pos, f"PR: {repo_pr}", 
+                        fontsize=10, ha='left', va='center', color='#34495e')
+                
+                y_pos -= 0.2
+            except Exception as e:
+                logger.error(f"Error adding PR thumbnail: {e}")
+        
+        # Add note about viewing detailed profiles
+        fig.text(0.5, 0.2, "Detailed PR quality scorecards are presented on the following pages", 
+                fontsize=12, ha='center', style='italic', color='#7f8c8d')
+        
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+        
+        # Add PR scorecards (up to 3 for brevity)
+        for path in scorecard_paths[:3]:
+            try:
+                # Extract PR info from filename
+                filename = path.name
+                repo_pr = filename.split('_scorecard')[0]
+                
+                # Create a new page for this scorecard
+                fig, ax = plt.subplots(figsize=(8.5, 11))
+                ax.axis('off')
+                
+                # Section title
+                fig.text(0.5, 0.95, f"PR Quality Scorecard: {repo_pr.replace('_', '/')}", 
+                        fontsize=20, ha='center', weight='bold', color='#2c3e50')
+                
+                # Add a horizontal line under the title
+                ax.axhline(y=0.92, xmin=0.1, xmax=0.9, color='#3498db', linewidth=2)
+                
+                # Load the scorecard image
+                img = mpimg.imread(str(path))
+                
+                # Calculate position to center the image
+                img_aspect = img.shape[1] / img.shape[0]  # width/height
+                width = 0.85
+                height = width / img_aspect
+                
+                # Position in center of page
+                ax.imshow(img, extent=[0.5-width/2, 0.5+width/2, 0.5-height/2, 0.5+height/2], 
+                         transform=fig.transFigure, aspect='auto')
+                
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+            except Exception as e:
+                logger.error(f"Error adding PR scorecard: {e}")# Add a horizontal line under the title
+        ax.axhline(y=0.92, xmin=0.1, xmax=0.9, color='#3498db', linewidth=2)
+        
         # Create a styled box for the explanation
         box = plt.Rectangle((0.1, 0.6), 0.8, 0.22, fill=True, 
                            color='#e8f4f8', alpha=0.7, transform=fig.transFigure,
@@ -614,10 +700,10 @@ class ReportGenerator:
         # Add a horizontal line under the title
         ax.axhline(y=0.92, xmin=0.1, xmax=0.9, color='#3498db', linewidth=2)
         
-        # Create styled boxes for each methodology component
+        # Component colors and borders
         component_colors = ['#e8f8f5', '#eafaf1', '#fef9e7', '#fae5d3']
         component_borders = ['#1abc9c', '#2ecc71', '#f1c40f', '#e67e22']
-        component_icons = ['🔍', '🧹', '🔗', '📊']
+        component_symbols = ['+', '#', '*', '@']  # Use simple symbols instead of emojis
         
         # Methodology text
         methodology = [
@@ -657,16 +743,16 @@ class ReportGenerator:
         # Position for components
         y_pos = 0.75
         for i, (title, details) in enumerate(components):
-            # Create box
+            # Create box with proper styling (avoid color parameter warning)
             box_height = 0.13
             box = plt.Rectangle((0.1, y_pos-box_height), 0.8, box_height, 
-                               fill=True, color=component_colors[i], alpha=0.7,
+                               fill=True, facecolor=component_colors[i], alpha=0.7,
                                transform=fig.transFigure, edgecolor=component_borders[i], 
                                linewidth=2, zorder=1)
             ax.add_patch(box)
             
-            # Add icon and title
-            fig.text(0.15, y_pos-0.03, component_icons[i], fontsize=18, ha='left', 
+            # Add symbol and title
+            fig.text(0.15, y_pos-0.03, component_symbols[i], fontsize=18, ha='left', 
                     va='center', color=component_borders[i], weight='bold')
             fig.text(0.2, y_pos-0.03, title, fontsize=14, ha='left', 
                     va='center', color='#34495e', weight='bold')
@@ -687,7 +773,7 @@ class ReportGenerator:
         
         # Create conclusion box
         concl_box = plt.Rectangle((0.1, 0.1), 0.8, 0.08, fill=True, 
-                               color='#eaecee', alpha=0.7, transform=fig.transFigure,
+                               facecolor='#eaecee', alpha=0.7, transform=fig.transFigure,
                                edgecolor='#7f8c8d', linewidth=1)
         ax.add_patch(concl_box)
         
@@ -719,8 +805,7 @@ def main():
     # if args.view and report_path.exists():
     #     try:
     #         if os.name == 'posix':  # Unix/Linux/MacOS
-    #             # subprocess.run(['xdg-open', str(report_path)], check=False)
-    #             pass
+    #             subprocess.run(['xdg-open', str(report_path)], check=False)
     #         elif os.name == 'nt':  # Windows
     #             os.startfile(str(report_path))
     #         else:
