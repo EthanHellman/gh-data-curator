@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
 
 # Import the filter components
-from src.dataflow.filtering.bot_filter import BotFilter
-from src.dataflow.filtering.size_complexity_filter import SizeComplexityFilter
-from src.dataflow.filtering.content_relevance_filter import ContentRelevanceFilter
-from src.dataflow.filtering.file_relationship import RelatedFilePredictor
+from dataflow.filtering.bot_filter import BotFilter
+from dataflow.filtering.size_complexity_filter import SizeComplexityFilter
+from dataflow.filtering.content_relevance_filter import ContentRelevanceFilter
+from dataflow.filtering.file_relationship import RelatedFilePredictor
 
 logger = logging.getLogger(__name__)
 
