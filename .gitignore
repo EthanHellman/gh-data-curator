@@ -36,6 +36,7 @@ data/processed/
 *.csv
 *.json
 data/repos/
+temp_check_qfrrfdb0/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
