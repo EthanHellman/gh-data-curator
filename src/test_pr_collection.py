@@ -1,4 +1,5 @@
 import argparse
+import json  # Add this import at the top of the file
 import logging
 import os
 import sys
