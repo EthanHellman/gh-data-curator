@@ -1,76 +1,3 @@
-# #!/usr/bin/env python3
-# """
-# PR Analysis Module - Simplified version to fix imports
-# """
-# import logging
-# import matplotlib.pyplot as plt
-# import numpy as np
-# import pandas as pd
-# import seaborn as sns
-# from matplotlib.patches import FancyBboxPatch, Rectangle
-# from sklearn.decomposition import PCA
-# from sklearn.preprocessing import StandardScaler
-# from sklearn.cluster import KMeans
-# from sklearn.manifold import TSNE
-# from pathlib import Path
-
-# from dataflow.analysis.functionality.visualization_utils import (
-#     add_gradient_background, 
-#     add_gradient_line, 
-#     adjust_color_brightness
-# )
-# from dataflow.analysis.styling.text_embeddings import (
-#     get_embeddings_for_pr_texts, 
-#     get_embeddings_for_pr_code, 
-#     extract_code_sample
-# )
-
-# logger = logging.getLogger("enhanced_report_generator")
-
-# def add_pr_clustering(generator, pdf):
-#     """Add PR clustering analysis to the report."""
-#     fig, ax = plt.subplots(figsize=(10, 8))
-#     ax.axis('off')
-    
-#     fig.text(0.5, 0.95, "PR Clustering Analysis", 
-#             fontsize=24, ha='center', weight='bold', color='#2c3e50')
-    
-#     add_gradient_line(fig, 0.1, 0.9, 0.92, color='#3498db')
-    
-#     intro_text = [
-#         "This section presents an analysis of PRs using clustering techniques.",
-#         "The visualizations show patterns across repositories."
-#     ]
-    
-#     fig.text(0.1, 0.87, "\n".join(intro_text), 
-#             fontsize=12, va='top', ha='left', linespacing=1.5, 
-#             color='#333333')
-    
-#     pdf.savefig(fig, bbox_inches='tight')
-#     plt.close(fig)
-
-# def add_code_embedding_visualization(generator, pdf):
-#     """Add a visualization of code embeddings."""
-#     fig, ax = plt.subplots(figsize=(10, 8))
-#     ax.axis('off')
-    
-#     fig.text(0.5, 0.5, "Code Embedding Visualization", 
-#             fontsize=18, ha='center', weight='bold', color='#2c3e50')
-    
-#     pdf.savefig(fig, bbox_inches='tight')
-#     plt.close(fig)
-
-# def add_text_embedding_visualization(generator, pdf):
-#     """Add a visualization of PR description embeddings."""
-#     fig, ax = plt.subplots(figsize=(10, 8))
-#     ax.axis('off')
-    
-#     fig.text(0.5, 0.5, "Text Embedding Visualization", 
-#             fontsize=18, ha='center', weight='bold', color='#2c3e50')
-    
-#     pdf.savefig(fig, bbox_inches='tight')
-#     plt.close(fig)
-
 #!/usr/bin/env python3
 """
 PR Analysis Module
@@ -116,7 +43,7 @@ def add_pr_clustering(generator, pdf):
     # Add a horizontal line under the title with gradient
     add_gradient_line(fig, 0.1, 0.9, 0.92, color='#3498db')
     
-    # Add introduction text
+    # Add introduction text with better spacing
     intro_text = [
         "This section presents an analysis of PRs using clustering and dimensionality reduction techniques.",
         "The following visualizations show how PRs are distributed in feature space, revealing patterns",
@@ -145,6 +72,15 @@ def add_code_embedding_visualization(generator, pdf):
     # Check if we have enough data
     if len(cluster_data) < 10:
         logger.warning("Not enough data for code embedding visualization")
+        # Create a placeholder visualization with error message
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.axis('off')
+        fig.text(0.5, 0.5, "Not enough data for code embedding visualization", 
+                fontsize=14, ha='center', weight='bold', color='#7f8c8d')
+        fig.text(0.5, 0.45, "Need at least 10 PRs that passed bot filter", 
+                fontsize=12, ha='center', color='#7f8c8d')
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
         return
     
     # Prepare data for embedding
@@ -199,7 +135,7 @@ def add_code_embedding_visualization(generator, pdf):
         # Exclude features with missing values
         valid_features = []
         for feature in features:
-            if not cluster_data[feature].isnull().any():
+            if feature in cluster_data.columns and not cluster_data[feature].isnull().any():
                 valid_features.append(feature)
         
         # Prepare data for PCA
@@ -214,30 +150,10 @@ def add_code_embedding_visualization(generator, pdf):
     pca = PCA(n_components=2)
     X_pca = pca.fit_transform(embeddings)
     
-    # Apply K-means clustering with silhouette analysis for optimal cluster number
-    best_score = -1
-    best_n_clusters = 3  # Default
-    
-    for n_clusters in range(2, min(6, len(embeddings) // 5 + 1)):
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(embeddings)
-        
-        # Simple evaluation based on inertia
-        score = -kmeans.inertia_
-        
-        if score > best_score:
-            best_score = score
-            best_n_clusters = n_clusters
-    
-    # Apply best clustering
-    kmeans = KMeans(n_clusters=best_n_clusters, random_state=42, n_init=10)
-    cluster_labels = kmeans.fit_predict(embeddings)
-    
-    # Create a DataFrame with PCA results and cluster labels
+    # Create a DataFrame with PCA results and metadata
     pca_df = pd.DataFrame({
         'PCA1': X_pca[:, 0],
         'PCA2': X_pca[:, 1],
-        'Cluster': cluster_labels,
         'Repository': cluster_data['repository'].values,
         'PR': cluster_data['pr_number'].values,
         'Passed': cluster_data['passed_filter'].values,
@@ -248,152 +164,47 @@ def add_code_embedding_visualization(generator, pdf):
     # Create the plot
     fig, ax = plt.subplots(figsize=(10, 8))
     
-    # Define colors for clusters
-    cluster_colors = sns.color_palette("Set2", best_n_clusters)
-    
     # Add subtle grid lines
     ax.grid(linestyle='--', alpha=0.3)
     
-    # Create scatter plot with custom styling
-    for i in range(best_n_clusters):
-        cluster_points = pca_df[pca_df['Cluster'] == i]
+    # Create scatter plot with custom styling, coloring by repository instead of cluster
+    for repo_key in cluster_data['repo_key'].unique():
+        repo_points = pca_df[pca_df['repo_key'] == repo_key]
         
         # Draw points with proper styling
         ax.scatter(
-            cluster_points['PCA1'], 
-            cluster_points['PCA2'],
-            s=cluster_points['Quality'] * 100 + 30,  # Size based on quality score
-            color=cluster_colors[i],
+            repo_points['PCA1'], 
+            repo_points['PCA2'],
+            s=repo_points['Quality'] * 100 + 30,  # Size based on quality score
+            color=generator.repository_colors.get(repo_key, 'gray'),
             alpha=0.7,
-            edgecolor=[generator.repository_colors.get(repo, 'gray') for repo in cluster_points['repo_key']],
-            linewidth=1.5,
-            label=f'Cluster {i+1}'
+            edgecolor='white',
+            linewidth=0.5,
+            label=repo_key.replace('_', '/')
         )
     
-    # Add markers for passed PRs
-    passed_prs = pca_df[pca_df['Passed'] == True]
-    if not passed_prs.empty:
-        ax.scatter(
-            passed_prs['PCA1'],
-            passed_prs['PCA2'],
-            s=passed_prs['Quality'] * 100 + 30,
-            facecolors='none',
-            edgecolors='black',
-            linewidth=1.5,
-            alpha=0.7,
-            label='Passed All Filters'
-        )
-    
-    # Create a legend for repositories
-    repo_legend_elements = []
-    for repo_key, color in generator.repository_colors.items():
-        if repo_key in pca_df['repo_key'].values:
-            repo_legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
-                                           markerfacecolor='gray',
-                                           markeredgecolor=color,
-                                           markersize=10, markeredgewidth=2,
-                                           label=repo_key.replace('_', '/')))
-    
-    # Add the repository legend on the right side of the plot
-    if repo_legend_elements:
-        repo_legend = plt.legend(handles=repo_legend_elements, 
-                               loc='center left', 
-                               bbox_to_anchor=(1.02, 0.5),
-                               title="Repositories",
-                               frameon=True,
-                               fontsize=9)
-        plt.gca().add_artist(repo_legend)
-    
-    # Add cluster legend at the bottom
-    cluster_legend_elements = []
-    for i in range(best_n_clusters):
-        cluster_legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
-                                               markerfacecolor=cluster_colors[i],
-                                               markersize=10,
-                                               label=f'Cluster {i+1}'))
-    
-    cluster_legend_elements.append(plt.Line2D([0], [0], marker='o', color='w',
-                                           markerfacecolor='none',
-                                           markeredgecolor='black',
-                                           markersize=10, markeredgewidth=1.5,
-                                           label='Passed All Filters'))
-    
-    plt.legend(handles=cluster_legend_elements, 
-              loc='upper center', 
-              bbox_to_anchor=(0.5, -0.12),
-              title="Clusters",
-              frameon=True,
-              fontsize=9,
-              ncol=len(cluster_legend_elements))
-    
-    # Enhance chart appearance
-    if use_feature_embedding:
-        title = 'PR Code Feature Embedding Visualization'
-        variance_explained = [pca.explained_variance_ratio_[0], pca.explained_variance_ratio_[1]]
-        
-        # Get feature importance for explanation
-        if not use_feature_embedding:
-            pc_explanation = "Using OpenAI code embeddings"
-        else:
-            # Find top contributing features for each principal component
-            feature_loadings = pd.DataFrame(
-                pca.components_.T,
-                columns=['PC1', 'PC2'],
-                index=valid_features
-            )
-            
-            # Find top contributing features for each principal component
-            pc1_features = feature_loadings.sort_values('PC1', key=abs, ascending=False)['PC1'].head(3)
-            pc2_features = feature_loadings.sort_values('PC2', key=abs, ascending=False)['PC2'].head(3)
-            
-            # Format nice feature names
-            feature_names = {
-                'file_count': 'File Count',
-                'code_file_count': 'Code Files',
-                'total_changes': 'Total Changes',
-                'additions': 'Additions',
-                'deletions': 'Deletions',
-                'size_score': 'Size Score',
-                'complexity_score': 'Complexity Score',
-                'relevance_score': 'Relevance Score',
-                'problem_solving_score': 'Problem Solving',
-                'code_quality_score': 'Code Quality'
-            }
-            
-            pc1_text = "PC1 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
-                                                 for feat, val in pc1_features.items()])
-            pc2_text = "PC2 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
-                                                 for feat, val in pc2_features.items()])
-            
-            pc_explanation = f"{pc1_text}\n{pc2_text}"
-    else:
-        title = 'PR Code Semantic Embedding Visualization'
-        variance_explained = [None, None]  # Not applicable for OpenAI embeddings
-        pc_explanation = "Using OpenAI code embeddings to capture semantic relationships between PRs"
-    
-    ax.set_xlabel(f'Dimension 1{" (" + f"{variance_explained[0]:.1%} variance)" if variance_explained[0] else ""}', 
-                fontsize=12, weight='bold')
-    ax.set_ylabel(f'Dimension 2{" (" + f"{variance_explained[1]:.1%} variance)" if variance_explained[1] else ""}', 
-                fontsize=12, weight='bold')
-    ax.set_title(title, fontsize=16, weight='bold', pad=20)
-    
-    # Add box with component explanations
-    explanation_text = (
-        f"{pc_explanation}\n\n"
-        "This visualization shows PRs positioned according to their code content.\n"
-        "Similar PRs are grouped into clusters, with point size indicating quality score.\n"
-        "Edge color represents repository, while black outlines indicate PRs that passed all filters."
+    # Create a repository legend with better positioning
+    repo_legend = plt.legend(
+        loc='center left',
+        bbox_to_anchor=(1.02, 0.5),
+        title="Repositories",
+        frameon=True,
+        fontsize=9
     )
     
-    box = FancyBboxPatch((0.05, 0.01), 0.9, 0.12, fill=True, 
-                      facecolor='#f8f9fa', alpha=0.9, transform=fig.transFigure, 
-                      boxstyle="round,pad=0.02", zorder=1000)
-    ax.add_artist(box)
+    # Enhance chart appearance
+    title = 'PR Code Semantic Embedding Visualization'
+    ax.set_xlabel('Dimension 1', fontsize=12, weight='bold')
+    ax.set_ylabel('Dimension 2', fontsize=12, weight='bold')
+    ax.set_title(title, fontsize=16, weight='bold', pad=20)
     
-    fig.text(0.5, 0.07, explanation_text, ha='center', fontsize=9, style='italic',
-            color='#333333', zorder=1001)
+    # Add simplified explanation
+    explanation_text = "Using OpenAI code embeddings to capture semantic relationships between PRs. Point size indicates quality score."
     
-    plt.tight_layout(rect=[0, 0.14, 0.85, 0.95])  # Adjust for title and legend
+    fig.text(0.5, 0.05, explanation_text, ha='center', fontsize=10, style='italic',
+            color='#333333')
+    
+    plt.tight_layout(rect=[0, 0.08, 0.85, 0.95])  # Adjust for title and legend
     
     # Save to figures directory for reference
     plt.savefig(generator.figures_dir / "pr_code_embedding.png", dpi=300)
@@ -405,22 +216,81 @@ def add_code_embedding_visualization(generator, pdf):
 
 def add_text_embedding_visualization(generator, pdf):
     """Add a visualization of PR description embeddings using OpenAI and dimensionality reduction."""
-    # Filter data to PRs with non-empty descriptions
-    text_data = generator.pr_data[
-        (generator.pr_data['passed_bot_filter'] == True) & 
-        (generator.pr_data['body'].notna()) & 
-        (generator.pr_data['body'] != '')
-    ].copy()
+    # Step 1: Filter data to PRs that passed the bot filter and combine title and body text
+    text_data = generator.pr_data[generator.pr_data['passed_bot_filter'] == True].copy()
+    
+    # Combine title and body for each PR to increase available text
+    text_data['combined_text'] = text_data.apply(
+        lambda row: f"{row['title'] or ''} {row['body'] or ''}", 
+        axis=1
+    )
+    
+    # Filter PRs with some meaningful text
+    text_data = text_data[text_data['combined_text'].str.len() > 10]
     
     # Check if we have enough data
     if len(text_data) < 10:
-        logger.warning("Not enough text data for embedding visualization")
+        logger.warning("Not enough text data for embedding visualization, attempting to retrieve more from raw files")
+        
+        # Try to retrieve more text data from raw files
+        for idx, row in generator.pr_data[generator.pr_data['passed_bot_filter'] == True].iterrows():
+            if pd.isna(row['body']) or len(row['body'] or '') < 20:
+                # Try to get body from raw files
+                pr_id = row['pr_number']
+                repo_key = row['repo_key']
+                
+                # Construct path to raw PR data
+                raw_path = generator.data_dir / "raw" / repo_key / f"pr_{pr_id}" / "details.json"
+                summary_path = generator.data_dir / "raw" / repo_key / f"pr_{pr_id}" / "summary.json"
+                
+                try:
+                    # Try details.json first
+                    if raw_path.exists():
+                        with open(raw_path, 'r') as f:
+                            import json
+                            details = json.load(f)
+                            if 'body' in details and details['body']:
+                                generator.pr_data.at[idx, 'body'] = details['body']
+                    
+                    # Try summary.json if details didn't work
+                    if (pd.isna(generator.pr_data.at[idx, 'body']) or generator.pr_data.at[idx, 'body'] == '') and summary_path.exists():
+                        with open(summary_path, 'r') as f:
+                            import json
+                            summary = json.load(f)
+                            if 'body' in summary and summary['body']:
+                                generator.pr_data.at[idx, 'body'] = summary['body']
+                except Exception as e:
+                    logger.warning(f"Error reading raw PR data for {repo_key}/pr_{pr_id}: {e}")
+        
+        # Retry with updated data
+        text_data = generator.pr_data[generator.pr_data['passed_bot_filter'] == True].copy()
+        text_data['combined_text'] = text_data.apply(
+            lambda row: f"{row['title'] or ''} {row['body'] or ''}", 
+            axis=1
+        )
+        text_data = text_data[text_data['combined_text'].str.len() > 10]
+    
+    # Check again if we have enough data
+    if len(text_data) < 10:
+        logger.warning("Still not enough text data for embedding visualization")
+        # Create a placeholder visualization with error message
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.axis('off')
+        fig.text(0.5, 0.5, "Not enough text data for embedding visualization", 
+                fontsize=14, ha='center', weight='bold', color='#7f8c8d')
+        fig.text(0.5, 0.45, "Need at least 10 PRs with sufficient text content", 
+                fontsize=12, ha='center', color='#7f8c8d')
+        fig.text(0.5, 0.4, "Try including more PR description data in the dataset", 
+                fontsize=12, ha='center', color='#7f8c8d')
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
         return
     
-    # Prepare texts for embedding
-    texts = text_data['body'].fillna('').tolist()
-    
+    # Step 3: Generate embeddings
     try:
+        # Prepare the texts
+        texts = text_data['combined_text'].tolist()
+        
         # Try to find the config file
         config_path = Path.home() / "gh-data-curator" / "config.json"
         if not config_path.exists():
@@ -447,30 +317,51 @@ def add_text_embedding_visualization(generator, pdf):
         vectorizer = TfidfVectorizer(
             max_features=100,  # Limit to top features
             stop_words='english',
-            min_df=2,  # Ignore terms that appear in fewer than 2 documents
-            max_df=0.9  # Ignore terms that appear in more than 90% of documents
+            min_df=1,  # Allow terms that appear in at least 1 document
+            max_df=0.95  # Ignore terms that appear in more than 95% of documents
         )
         
         # Transform texts to TF-IDF features
         try:
-            embeddings = vectorizer.fit_transform(texts).toarray()
-        except:
-            logger.error("Failed to create TF-IDF embeddings")
+            # Replace None or empty values with placeholder
+            processed_texts = [t if t else "no description" for t in texts]
+            embeddings = vectorizer.fit_transform(processed_texts).toarray()
+        except Exception as e:
+            logger.error(f"Failed to create TF-IDF embeddings: {e}")
+            # Create a placeholder visualization with error message
+            fig, ax = plt.subplots(figsize=(10, 8))
+            ax.axis('off')
+            fig.text(0.5, 0.5, "Failed to generate text embeddings", 
+                    fontsize=14, ha='center', weight='bold', color='#7f8c8d')
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
             return
     
-    # Apply dimensionality reduction
+    # Step 4: Apply dimensionality reduction
     try:
         # Try t-SNE first for better clustering
         tsne = TSNE(n_components=2, perplexity=min(30, len(texts)-1), random_state=42)
         X_reduced = tsne.fit_transform(embeddings)
         method = "t-SNE"
-    except:
-        # Fall back to PCA if t-SNE fails
-        pca = PCA(n_components=2)
-        X_reduced = pca.fit_transform(embeddings)
-        method = "PCA"
+    except Exception as e:
+        logger.error(f"Failed to apply t-SNE: {e}")
+        try:
+            # Fall back to PCA if t-SNE fails
+            pca = PCA(n_components=2)
+            X_reduced = pca.fit_transform(embeddings)
+            method = "PCA"
+        except Exception as e:
+            logger.error(f"Failed to apply PCA: {e}")
+            # Create a placeholder visualization with error message
+            fig, ax = plt.subplots(figsize=(10, 8))
+            ax.axis('off')
+            fig.text(0.5, 0.5, "Failed to reduce dimensionality for visualization", 
+                    fontsize=14, ha='center', weight='bold', color='#7f8c8d')
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+            return
     
-    # Create a DataFrame with the results
+    # Step 5: Create a DataFrame with the results
     embedding_df = pd.DataFrame({
         'X': X_reduced[:, 0],
         'Y': X_reduced[:, 1],
@@ -482,7 +373,7 @@ def add_text_embedding_visualization(generator, pdf):
         'Title': text_data['title'].values
     })
     
-    # Create the plot
+    # Step 6: Create the plot
     fig, ax = plt.subplots(figsize=(10, 8))
     
     # Add subtle grid
@@ -503,23 +394,14 @@ def add_text_embedding_visualization(generator, pdf):
             label=repo_key.replace('_', '/')
         )
     
-    # Add markers for passed PRs
-    passed_prs = embedding_df[embedding_df['Passed'] == True]
-    if not passed_prs.empty:
-        ax.scatter(
-            passed_prs['X'],
-            passed_prs['Y'],
-            s=passed_prs['Quality'] * 80 + 40,
-            facecolors='none',
-            edgecolors='black',
-            linewidth=1.5,
-            alpha=0.7,
-            label='Passed All Filters'
-        )
-    
-    # Add repository legend
-    plt.legend(title="Repositories", loc='center left', 
-              bbox_to_anchor=(1.02, 0.5), frameon=True, fontsize=9)
+    # Add repository legend with better positioning
+    plt.legend(
+        title="Repositories", 
+        loc='center left', 
+        bbox_to_anchor=(1.02, 0.5), 
+        frameon=True, 
+        fontsize=9
+    )
     
     # Enhance chart appearance
     ax.set_xlabel('Dimension 1', fontsize=12, weight='bold')
@@ -532,22 +414,13 @@ def add_text_embedding_visualization(generator, pdf):
         
     ax.set_title(title, fontsize=16, weight='bold', pad=20)
     
-    # Add explanation
-    explanation_text = (
-        f"This visualization uses OpenAI embeddings to show semantic relationships between PR descriptions.\n"
-        f"PRs with similar text content are positioned closer together in the space.\n"
-        f"Point size indicates quality score, color indicates repository, and black outlines show PRs passing all filters."
-    )
+    # Add simplified explanation
+    explanation_text = "Using text embeddings to capture semantic relationships between PR descriptions. Point size indicates quality score."
     
-    box = FancyBboxPatch((0.05, 0.01), 0.9, 0.1, fill=True, 
-                      facecolor='#f8f9fa', alpha=0.9, transform=fig.transFigure, 
-                      boxstyle="round,pad=0.02", zorder=1000)
-    ax.add_artist(box)
+    fig.text(0.5, 0.05, explanation_text, ha='center', fontsize=10, style='italic',
+            color='#333333')
     
-    fig.text(0.5, 0.06, explanation_text, ha='center', fontsize=9, style='italic',
-            color='#333333', zorder=1001)
-    
-    plt.tight_layout(rect=[0, 0.12, 0.85, 0.95])  # Adjust for title and legend
+    plt.tight_layout(rect=[0, 0.08, 0.85, 0.95])  # Adjust for title and legend
     
     # Save to figures directory for reference
     plt.savefig(generator.figures_dir / "pr_text_embedding.png", dpi=300)

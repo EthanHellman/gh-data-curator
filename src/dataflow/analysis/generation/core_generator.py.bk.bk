@@ -29,8 +29,7 @@ from dataflow.analysis.styling.report_sections import (
     add_cross_repo_comparison,
     add_repo_section,
     add_quality_profiles,
-    add_methodology_section,
-    add_correlation_section
+    add_methodology_section
 )
 from dataflow.analysis.styling.pr_analysis import (
     add_pr_clustering,
@@ -214,9 +213,6 @@ class EnhancedReportGenerator:
             
             # Cross-repository comparison
             add_cross_repo_comparison(self, pdf)
-            
-            # Add correlation matrix section (formerly missing)
-            add_correlation_section(self, pdf)
             
             # Add code embedding-based clustering
             add_code_embedding_visualization(self, pdf)
