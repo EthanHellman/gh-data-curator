@@ -86,6 +86,83 @@ The pipeline generates structured outputs in the data directory:
 /data/analysis_results/: Metrics, visualizations, and analysis outputs
 /data/reports/: Comprehensive PDF reports on data quality
 
+
+Filter Components
+1. Bot Filter
+Identifies and excludes automated PRs that don't represent genuine human problem-solving efforts.
+Key Heuristics:
+
+Bot username detection (e.g., dependabot, renovate)
+Automated PR title patterns (e.g., "bump version", "update dependency")
+Automated PR body phrases (e.g., "automatically created")
+Trivial change detection (e.g., "fix typo", "update readme")
+
+2. Size/Complexity Filter
+Ensures PRs are appropriately sized - neither too trivial nor too unwieldy to analyze effectively.
+Key Heuristics:
+
+Size thresholds:
+
+Minimum: 3 lines changed
+Maximum: 1000 lines changed
+Maximum files: 20 files
+
+
+File categorization (code, docs, config, generated)
+Optimal size scoring (peaks at 20-50 lines)
+Code-focused changes preferred
+
+3. Content Relevance Filter
+Assesses whether a PR contains meaningful software engineering content and problem-solving value.
+Key Heuristics:
+
+Problem-solving indicators (e.g., "fix bug", "implement feature")
+Code pattern detection (e.g., control structures, function definitions)
+Low-relevance indicators with penalties (e.g., "fix typo", "bump version")
+Bug fix identification and bonus scoring
+Minimum relevance threshold: 0.5
+
+Quality Scoring System
+The overall quality score is a weighted combination of:
+ComponentWeightDescriptionBot Score20%Inverse of bot likelihood (higher is better)Size Score30%Based on optimal size/complexity metricsContent Relevance50%Based on problem-solving value
+Relevant Files Prediction
+After filtering, the system identifies relevant files that weren't modified but provide important context:
+
+Import relationship analysis
+Naming similarity detection (e.g., test files for implementation)
+Directory proximity analysis
+Optional LLM-based semantic prediction
+
+Usage
+pythonfrom dataflow.filtering.filtering_pipeline import FilterPipeline
+
+# Initialize the pipeline
+pipeline = FilterPipeline(
+    data_dir=Path("~/data"),
+    use_openai=False,  # Optional: Use OpenAI for relevant files prediction
+    use_import_analysis=True  # Use import analysis for finding related files
+)
+
+# Run the filtering pipeline
+output_dir = pipeline.filter_repository("owner", "repo")
+Command Line Interface
+bash# Run the filtering pipeline with basic settings
+python run_simple_filter_test.py
+
+# Run with OpenAI for enhanced relevant files prediction
+python run_simple_filter_test.py --openai
+
+# Disable import analysis
+python run_simple_filter_test.py --no-import-analysis
+Output
+The pipeline produces:
+
+Filtered PR index
+Filter metadata for each PR
+Quality scores and filtering decisions
+List of relevant files for context
+
+
 Future Improvements
 
 Parallel processing for multiple repositories
