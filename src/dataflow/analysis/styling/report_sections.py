@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import json
 from matplotlib.patches import FancyBboxPatch, Rectangle
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_pdf import PdfPages
@@ -641,12 +642,12 @@ def add_quality_profiles(generator, pdf):
     
     # Find exemplary PRs for each repository
     if not generator.pr_data.empty:
-        selected_prs = []
-        
+        # Process each repository
         for repo_key in generator.repo_data.keys():
             repo_prs = generator.pr_data[generator.pr_data['repo_key'] == repo_key]
+            selected_prs = []
             
-            # 1. Find high quality PR (top score)
+            # 1. Find high quality PR (highest score from filtered PRs)
             high_quality_prs = repo_prs[
                 repo_prs['passed_filter'] == True
             ].sort_values('quality_score', ascending=False).head(1)
@@ -658,22 +659,22 @@ def add_quality_profiles(generator, pdf):
                 pr["quality_level"] = "High Quality PR"
                 selected_prs.append(pr)
             
-            # 2. Find medium quality PR (middle range if available)
+            # 2. Find medium quality PR (lowest passing score that's still above threshold)
             medium_quality_prs = repo_prs[
-                (repo_prs['passed_filter'] == True) &
-                (repo_prs['quality_score'] >= 0.5) &
-                (repo_prs['quality_score'] < 0.8)
-            ].head(1)
+                (repo_prs['passed_filter'] == True)
+            ].sort_values('quality_score', ascending=True).head(1)
             
-            if not medium_quality_prs.empty:
-                pr = medium_quality_prs.iloc[0].to_dict()
-                pr["metadata"] = next((meta for meta in generator.repo_data.get(repo_key, {}).get("filter_metadata", []) 
-                                   if meta.get("pr_number") == pr["pr_number"]), {})
-                pr["quality_level"] = "Medium Quality PR"
-                selected_prs.append(pr)
+            if not medium_quality_prs.empty and len(high_quality_prs) > 0:
+                # Make sure it's not the same PR as high quality (if only one passed)
+                if medium_quality_prs.iloc[0]['pr_number'] != high_quality_prs.iloc[0]['pr_number']:
+                    pr = medium_quality_prs.iloc[0].to_dict()
+                    pr["metadata"] = next((meta for meta in generator.repo_data.get(repo_key, {}).get("filter_metadata", []) 
+                                       if meta.get("pr_number") == pr["pr_number"]), {})
+                    pr["quality_level"] = "Medium Quality PR"
+                    selected_prs.append(pr)
             
-            # 3. Find PR that failed filtering
-            # First try to find one that failed content filter
+            # 3. Find a failed PR (prioritize different filter failures)
+            # First try content filter
             content_filtered_pr = repo_prs[
                 (repo_prs['passed_bot_filter'] == True) &
                 (repo_prs['passed_size_filter'] == True) &
@@ -714,29 +715,10 @@ def add_quality_profiles(generator, pdf):
                         pr["quality_level"] = "Failed PR (Bot Filter)"
                         pr["failure_reason"] = "Failed Bot Filter: Likely automated or bot-created"
                         selected_prs.append(pr)
-        
-        # Limit total number of scorecards to avoid bloating the report
-        if len(selected_prs) > 10:
-            # Ensure at least one PR from each repo
-            repo_keys = generator.repo_data.keys()
-            repo_represented = {key: False for key in repo_keys}
-            final_selected = []
             
-            # First pass: include one PR from each repo
+            # Add scorecards for this repository's PRs
             for pr in selected_prs:
-                if not repo_represented[pr['repo_key']]:
-                    repo_represented[pr['repo_key']] = True
-                    final_selected.append(pr)
-            
-            # Second pass: add remaining PRs until limit
-            remaining = [pr for pr in selected_prs if pr not in final_selected]
-            final_selected.extend(remaining[:10 - len(final_selected)])
-            
-            selected_prs = final_selected
-        
-        # Add scorecards for selected PRs
-        for pr in selected_prs:
-            add_pr_scorecard(generator, pdf, pr)
+                add_pr_scorecard(generator, pdf, pr)
     else:
         # Add a note if no PR data available
         fig, ax = plt.subplots(figsize=(8.5, 11))
@@ -756,6 +738,25 @@ def add_pr_scorecard(generator, pdf, pr):
     metadata = pr.get("metadata", {})
     quality_level = pr.get("quality_level", "")
     failure_reason = pr.get("failure_reason", "")
+    
+    # Always get PR title from basic_info.json in raw data
+    pr_title = ""
+    basic_info_path = Path(f"/home/ubuntu/gh-data-curator/data/raw/{repo_key}/pr_{pr_number}/basic_info.json")
+    if not basic_info_path.exists():
+        # Try relative path based on generator.data_dir
+        basic_info_path = generator.data_dir / "raw" / repo_key / f"pr_{pr_number}" / "basic_info.json"
+    
+    try:
+        if basic_info_path.exists():
+            with open(basic_info_path, 'r') as f:
+                basic_info = json.load(f)
+                pr_title = basic_info.get("title", "")
+    except Exception as e:
+        logger.error(f"Error loading basic_info.json for {repo_key}/pr_{pr_number}: {e}")
+    
+    # Fall back to title from PR data if basic_info.json not available
+    if not pr_title:
+        pr_title = pr.get("title", "No title available")
     
     fig, axes = plt.subplots(3, 2, figsize=(10, 12), 
                             gridspec_kw={'height_ratios': [1, 1.2, 1.5], 
@@ -778,21 +779,21 @@ def add_pr_scorecard(generator, pdf, pr):
     }
     quality_color = quality_colors.get(quality_level, "#3498db")
     
-    # Add quality level badge
-    quality_box = Rectangle((0.1, 0.94), 0.8, 0.03, 
+    # Improved quality level badge - positioned below title with better styling
+    quality_box = Rectangle((0.1, 0.92), 0.8, 0.04, 
                           facecolor=quality_color, alpha=0.2, 
                           edgecolor=quality_color, linewidth=1,
                           transform=fig.transFigure)
     fig.add_artist(quality_box)
     
-    fig.text(0.5, 0.955, quality_level, 
-            fontsize=12, ha='center', weight='bold', 
+    fig.text(0.5, 0.94, quality_level, 
+            fontsize=13, ha='center', weight='bold', 
             color=quality_color)
     
-    # If failed PR, add failure reason
+    # If failed PR, add failure reason with improved styling
     if "Failed PR" in quality_level and failure_reason:
-        fig.text(0.5, 0.93, failure_reason, 
-                fontsize=10, ha='center', style='italic', 
+        fig.text(0.5, 0.925, failure_reason, 
+                fontsize=11, ha='center', style='italic', 
                 color=quality_color)
     
     # 1. Filter scores (top left)
@@ -824,26 +825,66 @@ def add_pr_scorecard(generator, pdf, pr):
     axes[0].text(0, 0.5, "Threshold", fontsize=8, color='red', 
                va='bottom', ha='left', alpha=0.7)
     
-    # 2. File composition (top right)
-    file_counts = {
-        'Code': metadata.get("size_filter", {}).get("details", {}).get("code_file_count", 0),
-        'Docs': metadata.get("size_filter", {}).get("details", {}).get("doc_file_count", 0),
-        'Config': metadata.get("size_filter", {}).get("details", {}).get("config_file_count", 0),
-        'Generated': metadata.get("size_filter", {}).get("details", {}).get("generated_file_count", 0),
-        'Other': metadata.get("size_filter", {}).get("details", {}).get("other_file_count", 0)
-    }
+    # 2. File composition (top right) based on file types edited in the PR
+    # Get file data from files.json in raw data
+    files_path = Path(f"/home/ubuntu/gh-data-curator/data/raw/{repo_key}/pr_{pr_number}/files.json")
+    if not files_path.exists():
+        # Try relative path based on generator.data_dir
+        files_path = generator.data_dir / "raw" / repo_key / f"pr_{pr_number}" / "files.json"
     
-    # Remove zero values
-    file_counts = {k: v for k, v in file_counts.items() if v > 0}
+    file_types = {}
+    try:
+        if files_path.exists():
+            with open(files_path, 'r') as f:
+                files_data = json.load(f)
+                
+                # Count file types by extension
+                for file in files_data:
+                    if 'filename' in file:
+                        ext = Path(file['filename']).suffix.lower()
+                        if not ext:
+                            ext = "(no extension)"
+                        else:
+                            # Remove the dot
+                            ext = ext[1:]
+                        
+                        # Group similar extensions
+                        if ext in ['py', 'pyw', 'pyx']:
+                            category = 'Python'
+                        elif ext in ['js', 'jsx', 'ts', 'tsx']:
+                            category = 'JavaScript'
+                        elif ext in ['html', 'htm', 'template']:
+                            category = 'HTML'
+                        elif ext in ['css', 'scss', 'sass', 'less']:
+                            category = 'CSS'
+                        elif ext in ['md', 'rst', 'txt', 'text']:
+                            category = 'Docs'
+                        elif ext in ['json', 'yaml', 'yml', 'toml', 'ini', 'cfg']:
+                            category = 'Config'
+                        elif ext in ['xml', 'svg']:
+                            category = 'XML'
+                        elif ext in ['sql']:
+                            category = 'SQL'
+                        elif ext in ['gitignore', 'dockerignore', 'editorconfig']:
+                            category = 'Meta'
+                        else:
+                            category = ext.capitalize()  # Use the extension as category
+                        
+                        if category in file_types:
+                            file_types[category] += 1
+                        else:
+                            file_types[category] = 1
+    except Exception as e:
+        logger.error(f"Error loading files.json for {repo_key}/pr_{pr_number}: {e}")
     
-    if file_counts:
+    if file_types:
         # Use enhanced styling for pie chart with better label positioning
         wedges, texts, autotexts = axes[1].pie(
-            file_counts.values(), 
-            labels=file_counts.keys(),
+            file_types.values(), 
+            labels=file_types.keys(),
             autopct='%1.1f%%',
             startangle=90,
-            colors=sns.color_palette("Set2", len(file_counts)),
+            colors=sns.color_palette("Set2", len(file_types)),
             wedgeprops={'edgecolor': 'white', 'linewidth': 1},
             textprops={'fontsize': 9},
             pctdistance=0.85,  # Move percentage labels closer to center
@@ -855,10 +896,10 @@ def add_pr_scorecard(generator, pdf, pr):
             autotext.set_fontsize(8)
             autotext.set_weight('bold')
         
-        axes[1].set_title("File Type Composition", fontsize=12, weight='bold')
+        axes[1].set_title("File Types Modified", fontsize=12, weight='bold')
     else:
         axes[1].text(0.5, 0.5, "No file data available", ha='center', va='center')
-        axes[1].set_title("File Type Composition (No Data)", fontsize=12, weight='bold')
+        axes[1].set_title("File Types Modified (No Data)", fontsize=12, weight='bold')
         axes[1].axis('off')
     
     # 3. Code changes (middle left)
@@ -882,7 +923,30 @@ def add_pr_scorecard(generator, pdf, pr):
     axes[2].grid(axis='y', linestyle='--', alpha=0.3)
     
     # 4. Relevant files (middle right)
-    relevant_files = pr.get("relevant_files", [])
+    # Get relevant files from metadata or PR data
+    relevant_files = []
+    
+    # First try relevant_files from metadata
+    if "relevant_files" in metadata:
+        relevant_files = metadata.get("relevant_files", [])
+    # Then try from PR object directly
+    elif "relevant_files" in pr:
+        relevant_files = pr.get("relevant_files", [])
+    # If still empty, try loading from filter_metadata.json
+    if not relevant_files:
+        filter_metadata_path = Path(f"/home/ubuntu/gh-data-curator/data/filtered/{repo_key}/pr_{pr_number}/filter_metadata.json")
+        if not filter_metadata_path.exists():
+            # Try relative path based on generator.data_dir
+            filter_metadata_path = generator.data_dir / "filtered" / repo_key / f"pr_{pr_number}" / "filter_metadata.json"
+        
+        if filter_metadata_path.exists():
+            try:
+                with open(filter_metadata_path, 'r') as f:
+                    filter_data = json.load(f)
+                    relevant_files = filter_data.get("relevant_files", [])
+            except Exception as e:
+                logger.error(f"Error loading filter_metadata.json for {repo_key}/pr_{pr_number}: {e}")
+    
     num_relevant = len(relevant_files)
     
     if relevant_files:
@@ -905,32 +969,33 @@ def add_pr_scorecard(generator, pdf, pr):
                           edgecolor='#bdc3c7', linewidth=1)
         axes[3].add_patch(file_bg)
         
-        # Position files with better spacing
+        # Position files with better spacing - all files in black text
         for i, file in enumerate(display_files):
             y_pos = 0.85 - (i * 0.12)  # Increased spacing between lines
             
-            # Use different styling for different file types
-            if file.endswith(".py"):
-                color = "#3572A5"  # Python color
-                prefix = "PY "
-            elif file.endswith(".js"):
-                color = "#f1e05a"  # JavaScript color
-                prefix = "JS "
-            elif file.endswith(".md"):
-                color = "#083fa1"  # Markdown color
-                prefix = "MD "
-            elif file.endswith(".json") or file.endswith(".yml") or file.endswith(".yaml"):
-                color = "#cb171e"  # Config color
-                prefix = "CF "
-            elif "..." in file:
-                color = "#666666"  # For ellipsis
+            # Use just a prefix based on file type but keep text black
+            if "..." in file:
                 prefix = ""
+                text_color = "#666666"  # Gray for ellipsis
             else:
-                color = "#333333"  # Default color
-                prefix = "FL "
+                ext = Path(file).suffix.lower()
+                # Choose prefix based on file type
+                if ext in ['.py', '.pyw']:
+                    prefix = "PY: "
+                elif ext in ['.js', '.jsx', '.ts']:
+                    prefix = "JS: "
+                elif ext in ['.md', '.rst', '.txt']:
+                    prefix = "DOC: "
+                elif ext in ['.json', '.yml', '.yaml', '.toml']:
+                    prefix = "CFG: "
+                elif ext in ['.html', '.htm']:
+                    prefix = "HTML: "
+                else:
+                    prefix = ""
+                text_color = "#333333"  # Consistent black color for all files
             
             # Display filename with word wrapping for long filenames
-            if len(file) > 30:
+            if len(file) > 30 and "..." not in file:
                 # Split long filenames to multiple lines
                 parts = file.split('/')
                 if len(parts) > 2:
@@ -938,15 +1003,15 @@ def add_pr_scorecard(generator, pdf, pr):
                     dir_path = '/'.join(parts[:-1])
                     file_name = parts[-1]
                     axes[3].text(0.15, y_pos, f"{prefix}{dir_path}/", 
-                               ha='left', va='center', fontsize=8, color=color)
+                               ha='left', va='center', fontsize=8, color=text_color)
                     axes[3].text(0.25, y_pos-0.05, f"{file_name}", 
-                               ha='left', va='center', fontsize=8, color=color)
+                               ha='left', va='center', fontsize=8, color=text_color)
                 else:
                     axes[3].text(0.15, y_pos, f"{prefix}{file}", 
-                               ha='left', va='center', fontsize=8, color=color)
+                               ha='left', va='center', fontsize=8, color=text_color)
             else:
                 axes[3].text(0.15, y_pos, f"{prefix}{file}", 
-                           ha='left', va='center', fontsize=9, color=color)
+                           ha='left', va='center', fontsize=9, color=text_color)
     else:
         axes[3].axis('off')
         axes[3].text(0.5, 0.5, "No relevant files identified", 
@@ -1032,18 +1097,16 @@ def add_pr_scorecard(generator, pdf, pr):
             fig.text(0.12, y_pos, "...", 
                     fontsize=9, family='monospace', color='#666666')
     
-    # Add PR title and description at the bottom with better positioning
-    pr_title = pr.get("title", "")
-    
+    # Add PR title at the bottom with better positioning
     # Use a more subtle box for the PR title
     title_box = Rectangle((0.05, 0.01), 0.9, 0.05, 
-                       facecolor='#e8f4f8', alpha=0.5, 
-                       edgecolor='#3498db', linewidth=1,
-                       transform=fig.transFigure)
+                        facecolor='#e8f4f8', alpha=0.5, 
+                        edgecolor='#3498db', linewidth=1,
+                        transform=fig.transFigure)
     fig.add_artist(title_box)
     
-    # Add title with smaller font
-    fig.text(0.07, 0.04, f"Title: {pr_title}", fontsize=9, weight='bold')
+    # Add title with smaller font - ensure it's not empty
+    fig.text(0.07, 0.04, f"Title: {pr_title or 'No title available'}", fontsize=9, weight='bold')
     
     plt.tight_layout(rect=[0, 0.07, 1, 0.91])  # Adjusted rect to make room for title and footer
     
@@ -1135,25 +1198,22 @@ def extract_code_snippet_from_pr(generator, repo_key, pr_number, max_lines=15):
         Tuple of (code_snippet, file_name, language)
     """
     # Path to raw PR data
-    pr_dir = generator.data_dir / "raw" / repo_key / f"pr_{pr_number}"
+    files_path = Path(f"/home/ubuntu/gh-data-curator/data/raw/{repo_key}/pr_{pr_number}/files.json")
+    if not files_path.exists():
+        # Try relative path based on generator.data_dir
+        files_path = generator.data_dir / "raw" / repo_key / f"pr_{pr_number}" / "files.json"
     
-    if not pr_dir.exists():
-        return "No code files available", "N/A", "text"
-    
-    # Try to find files.json which contains the changed files
-    files_path = pr_dir / "files.json"
     if not files_path.exists():
         return "No files data available", "N/A", "text"
     
     try:
         with open(files_path, 'r') as f:
-            import json
             files_data = json.load(f)
         
-        # Find the most significant file
+        # Find the file with the most changes
         significant_file = None
         max_changes = 0
-        code_extensions = ['.py', '.js', '.java', '.c', '.cpp', '.rs', '.go', '.rb', '.php', '.ts']
+        code_extensions = ['.py', '.js', '.java', '.c', '.cpp', '.rs', '.go', '.rb', '.php', '.ts', '.jsx', '.tsx']
         
         # First try to find code files with significant changes
         for file in files_data:
@@ -1163,7 +1223,7 @@ def extract_code_snippet_from_pr(generator, repo_key, pr_number, max_lines=15):
             if ext not in code_extensions:
                 continue
                 
-            # Calculate total changes
+            # Calculate total changes - prioritize files with more changes
             additions = file.get('additions', 0)
             deletions = file.get('deletions', 0)
             total_changes = additions + deletions
@@ -1175,11 +1235,16 @@ def extract_code_snippet_from_pr(generator, repo_key, pr_number, max_lines=15):
         # If no code file found, take any file with changes
         if significant_file is None and files_data:
             for file in files_data:
+                # Get changes
                 additions = file.get('additions', 0)
                 deletions = file.get('deletions', 0)
                 total_changes = additions + deletions
                 
-                if total_changes > max_changes:
+                # Check if this file has a patch
+                has_patch = "patch" in file and file["patch"]
+                
+                # Prioritize files with patches and more changes
+                if has_patch and total_changes > max_changes:
                     max_changes = total_changes
                     significant_file = file
         
@@ -1195,80 +1260,96 @@ def extract_code_snippet_from_pr(generator, repo_key, pr_number, max_lines=15):
         if not patch:
             return f"No patch available for {filename}", filename, "text"
         
-        # Extract the core of the patch (remove header lines)
-        patch_lines = patch.split('\n')
-        content_lines = []
-        in_content = False
-        additions_count = 0
-        
-        for line in patch_lines:
-            if line.startswith('@@'):
-                in_content = True
-                continue
-                
-            if in_content:
-                # Only include added/context lines, not removed lines
-                if line.startswith('+'):
-                    # Remove the leading '+'
-                    content_lines.append(line[1:])
-                    additions_count += 1
-                    if additions_count >= max_lines:
-                        break
-                elif not line.startswith('-'):
-                    # This is context line, include a few for better understanding
-                    content_lines.append(line)
-                    if additions_count > 0:  # Only count context after we've seen at least one addition
-                        additions_count += 0.5  # Count context lines as half for the limit
-                        if additions_count >= max_lines:
-                            break
-        
-        # If too few lines, try to add some context lines
-        if len(content_lines) < 5 and len(patch_lines) > 5:
-            # Just take the first several lines after the header
-            for line in patch_lines:
-                if line.startswith('@@'):
-                    in_content = True
-                    continue
-                if in_content and len(content_lines) < max_lines:
-                    if not line.startswith('-'):
-                        content_lines.append(line.replace('+', '', 1))
-        
-        # Clean up lines
-        content_lines = [line for line in content_lines if line]
-        
-        # Get language from file extension
-        ext = Path(filename).suffix.lower()
-        language_map = {
-            '.py': 'python',
-            '.js': 'javascript',
-            '.java': 'java',
-            '.c': 'c',
-            '.cpp': 'cpp',
-            '.rs': 'rust',
-            '.go': 'go',
-            '.rb': 'ruby',
-            '.php': 'php',
-            '.ts': 'typescript',
-            '.css': 'css',
-            '.html': 'html',
-            '.sql': 'sql',
-            '.md': 'markdown',
-            '.sh': 'bash',
-            '.json': 'json',
-            '.xml': 'xml',
-            '.yaml': 'yaml',
-            '.yml': 'yaml',
-        }
-        language = language_map.get(ext, 'text')
-        
-        if content_lines:
-            return '\n'.join(content_lines), filename, language
-        else:
-            return f"No meaningful code content extracted from {filename}", filename, "text"
+        return extract_code_from_patch(patch, filename, max_lines)
             
     except Exception as e:
         logger.error(f"Error extracting code snippet: {e}")
         return f"Error extracting code: {str(e)}", "error", "text"
+
+def extract_code_from_patch(patch, filename, max_lines=15):
+    """
+    Extract code from a patch string, focusing on added lines.
+    
+    Args:
+        patch: Patch string from GitHub API
+        filename: Name of the file
+        max_lines: Maximum number of lines to extract
+    
+    Returns:
+        Tuple of (code_snippet, filename, language)
+    """
+    # Extract the core of the patch (remove header lines)
+    patch_lines = patch.split('\n')
+    content_lines = []
+    in_content = False
+    additions_count = 0
+    
+    for line in patch_lines:
+        if line.startswith('@@'):
+            in_content = True
+            continue
+            
+        if in_content:
+            # Only include added/context lines, not removed lines
+            if line.startswith('+'):
+                # Remove the leading '+'
+                content_lines.append(line[1:])
+                additions_count += 1
+                if additions_count >= max_lines:
+                    break
+            elif not line.startswith('-'):
+                # This is context line, include a few for better understanding
+                content_lines.append(line)
+                if additions_count > 0:  # Only count context after we've seen at least one addition
+                    additions_count += 0.5  # Count context lines as half for the limit
+                    if additions_count >= max_lines:
+                        break
+    
+    # If too few lines, try to add some context lines
+    if len(content_lines) < 5 and len(patch_lines) > 5:
+        # Just take the first several lines after the header
+        content_lines = []
+        in_content = False
+        for line in patch_lines:
+            if line.startswith('@@'):
+                in_content = True
+                continue
+            if in_content and len(content_lines) < max_lines:
+                if not line.startswith('-'):
+                    content_lines.append(line.replace('+', '', 1))
+    
+    # Clean up lines
+    content_lines = [line for line in content_lines if line]
+    
+    # Get language from file extension
+    ext = Path(filename).suffix.lower()
+    language_map = {
+        '.py': 'python',
+        '.js': 'javascript',
+        '.java': 'java',
+        '.c': 'c',
+        '.cpp': 'cpp',
+        '.rs': 'rust',
+        '.go': 'go',
+        '.rb': 'ruby',
+        '.php': 'php',
+        '.ts': 'typescript',
+        '.css': 'css',
+        '.html': 'html',
+        '.sql': 'sql',
+        '.md': 'markdown',
+        '.sh': 'bash',
+        '.json': 'json',
+        '.xml': 'xml',
+        '.yaml': 'yaml',
+        '.yml': 'yaml',
+    }
+    language = language_map.get(ext, 'text')
+    
+    if content_lines:
+        return '\n'.join(content_lines), filename, language
+    else:
+        return f"No meaningful code content extracted from {filename}", filename, "text"
 
 def add_methodology_section(generator, pdf):
     """Add a simplified methodology section to the report."""
