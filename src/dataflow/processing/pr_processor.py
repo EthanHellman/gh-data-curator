@@ -13,28 +13,62 @@ class PRProcessor:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.raw_dir = data_dir / "raw"
+        self.selected_dir = data_dir / "selected"
         self.processed_dir = data_dir / "processed"
         self.processed_dir.mkdir(exist_ok=True)
     
-    def process_repository(self, owner: str, repo: str) -> Path:
-        """Process all PRs for a repository."""
-        repo_dir = self.raw_dir / f"{owner}_{repo}"
+    def process_repository(self, owner: str, repo: str, source_dir: Optional[Path] = None) -> Path:
+        """
+        Process all PRs for a repository.
+        
+        Args:
+            owner: Repository owner or organization
+            repo: Repository name
+            source_dir: Optional source directory (defaults to raw data directory)
+        
+        Returns:
+            Path to the processed data directory
+        """
+        repo_key = f"{owner}_{repo}"
+        
+        # Use provided source directory or default to raw data
+        if source_dir is None:
+            # Check selected directory first, fall back to raw
+            selected_repo_dir = self.selected_dir / repo_key
+            if selected_repo_dir.exists():
+                repo_dir = selected_repo_dir
+                logger.info(f"Using selected data as source for processing: {repo_dir}")
+            else:
+                repo_dir = self.raw_dir / repo_key
+                logger.info(f"Using raw data as source for processing: {repo_dir}")
+        else:
+            repo_dir = source_dir
+            logger.info(f"Using provided source directory for processing: {repo_dir}")
+            
         if not repo_dir.exists():
-            logger.error(f"Repository data not found: {repo_dir}")
+            logger.error(f"Source data not found: {repo_dir}")
             return None
         
         # Output directory for processed data
-        output_dir = self.processed_dir / f"{owner}_{repo}"
+        output_dir = self.processed_dir / repo_key
         output_dir.mkdir(exist_ok=True)
         
         # Load PR index
         index_path = repo_dir / "index.json"
-        if not index_path.exists():
-            logger.error(f"PR index not found: {index_path}")
-            return None
+        selected_index_path = repo_dir / "selected_index.json"
         
-        with open(index_path, "r") as f:
-            pr_index = json.load(f)
+        # Check for either regular or selected index
+        if index_path.exists():
+            with open(index_path, "r") as f:
+                pr_index = json.load(f)
+            logger.info(f"Using standard index with {len(pr_index)} PRs")
+        elif selected_index_path.exists():
+            with open(selected_index_path, "r") as f:
+                pr_index = json.load(f)
+            logger.info(f"Using selected index with {len(pr_index)} PRs")
+        else:
+            logger.error(f"No PR index found in {repo_dir}")
+            return None
         
         logger.info(f"Processing {len(pr_index)} PRs for {owner}/{repo}")
         

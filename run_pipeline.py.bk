@@ -1,0 +1,755 @@
+#!/usr/bin/env python3
+"""
+Unified Data Curation Pipeline
+
+This script runs the complete data curation pipeline with the following stages:
+1. Clone repository
+2. Collect PR data
+3. Process PR data
+4. Filter PRs
+5. Analyze results
+6. Generate report
+
+Usage:
+    python run_pipeline.py --org django --repo django --prs 30 --stages all
+    python run_pipeline.py --org django --repo django --prs 30 --stages clone,collect,process
+"""
+
+import argparse
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+import json
+
+# Add the project root to Python path to find modules
+current_dir = Path(__file__).parent.absolute()
+sys.path.append(str(current_dir))
+sys.path.append(str(current_dir / "src"))
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("pipeline.log")
+    ]
+)
+logger = logging.getLogger("pipeline")
+
+# Import pipeline components
+try:
+    # Try standard imports first
+    try:
+        from dataflow.acquisition.pr_collector import PRCollector
+        from dataflow.selection.pr_selector import PRSelector
+        from dataflow.processing.pr_processor import PRProcessor
+        from dataflow.filtering.filtering_pipeline import FilterPipeline
+        from dataflow.analysis.analyze_filter_results import FilterResultsAnalyzer
+        from dataflow.analysis.generate_report import ReportGenerator
+        from utils.git_utils import clone_repo, does_repo_exist
+    except ImportError:
+        # Fall back to src prefixed imports
+        logger.info("Trying alternative import paths with 'src.' prefix...")
+        from src.dataflow.acquisition.pr_collector import PRCollector
+        from src.dataflow.selection.pr_selector import PRSelector
+        from src.dataflow.processing.pr_processor import PRProcessor
+        from src.dataflow.filtering.filtering_pipeline import FilterPipeline
+        from src.dataflow.analysis.analyze_filter_results import FilterResultsAnalyzer
+        from src.dataflow.analysis.generate_report import ReportGenerator
+        from src.utils.git_utils import clone_repo, does_repo_exist
+except ImportError as e:
+    logger.error(f"Error importing required modules: {e}")
+    logger.error("Make sure you're running this script from the project root directory")
+    logger.error("Current search paths: {}".format(sys.path))
+    sys.exit(1)
+
+# Define pipeline stages
+STAGES = ["clone", "collect", "select", "process", "filter", "analyze", "report", "none"]
+
+class Pipeline:
+    """Unified data curation pipeline."""
+    
+    def __init__(self, 
+                 data_dir: Path, 
+                 github_token: str, 
+                 openai_api_key: Optional[str] = None):
+        """
+        Initialize the pipeline.
+        
+        Args:
+            data_dir: Base directory for data storage
+            github_token: GitHub API token
+            openai_api_key: OpenAI API key (optional)
+        """
+        self.data_dir = data_dir
+        self.github_token = github_token
+        self.openai_api_key = openai_api_key
+        
+        # Create data directories
+        self.repos_dir = data_dir / "repos"
+        self.raw_dir = data_dir / "raw"
+        self.selected_dir = data_dir / "selected"
+        self.processed_dir = data_dir / "processed"
+        self.filtered_dir = data_dir / "filtered"
+        self.analysis_dir = data_dir / "analysis_results"
+        self.reports_dir = data_dir / "reports"
+        
+        # Create directories
+        for directory in [self.repos_dir, self.raw_dir, self.selected_dir, self.processed_dir, 
+                         self.filtered_dir, self.analysis_dir, self.reports_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize pipeline components
+        self.pr_collector = PRCollector(github_token, data_dir)
+        self.pr_selector = PRSelector(data_dir)
+        self.pr_processor = PRProcessor(data_dir)
+        self.filter_pipeline = FilterPipeline(
+            data_dir=data_dir,
+            use_openai=bool(openai_api_key),
+            use_import_analysis=True
+        )
+        self.analyzer = FilterResultsAnalyzer(data_dir)
+        self.report_generator = ReportGenerator(data_dir)
+        
+        # Timing statistics
+        self.timings = {}
+    
+    def run(self, 
+            org: str, 
+            repo: str, 
+            pr_count: int, 
+            stages: List[str], 
+            force: bool = False, 
+            dry_run: bool = False,
+            initial_sample: int = 0) -> Dict[str, Any]:
+        """
+        Run the pipeline for a specific repository.
+        
+        Args:
+            org: Repository owner/organization
+            repo: Repository name
+            pr_count: Number of PRs to collect
+            stages: List of stages to run
+            force: Force re-run of stages even if data exists
+            dry_run: If True, don't execute commands, just print what would be done
+            
+        Returns:
+            Dictionary with results and statistics
+        """
+        repo_key = f"{org}_{repo}"
+        results = {
+            "org": org,
+            "repo": repo,
+            "pr_count": pr_count,
+            "stages_run": [],
+            "statistics": {},
+            "timings": {},
+            "errors": []
+        }
+        
+        # Function to log stage info
+        def log_stage(stage: str, action: str, details: str = ""):
+            logger.info(f"{'[DRY RUN] ' if dry_run else ''}[{stage.upper()}] {action} {org}/{repo}{' '+details if details else ''}")
+        
+        try:
+            # 1. Clone repository
+            if "clone" in stages:
+                log_stage("clone", "Cloning repository")
+                results["stages_run"].append("clone")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    # Check if repo exists on GitHub
+                    if not does_repo_exist(repo, org):
+                        error_msg = f"Repository {org}/{repo} does not exist on GitHub"
+                        logger.error(f"[CLONE] {error_msg}")
+                        results["errors"].append({"stage": "clone", "error": error_msg})
+                    else:
+                        # Clone repository or skip if already exists
+                        repo_path = self.repos_dir / repo_key
+                        if repo_path.exists() and not force:
+                            logger.info(f"[CLONE] Repository already exists at {repo_path}. Use --force to re-clone.")
+                        else:
+                            if repo_path.exists() and force:
+                                logger.info(f"[CLONE] Removing existing repository at {repo_path}")
+                                import shutil
+                                shutil.rmtree(repo_path, ignore_errors=True)
+                            
+                            result = clone_repo(repo, str(repo_path), org)
+                            if not result:
+                                error_msg = f"Failed to clone repository {org}/{repo}"
+                                logger.error(f"[CLONE] {error_msg}")
+                                results["errors"].append({"stage": "clone", "error": error_msg})
+                    
+                    self.timings["clone"] = time.time() - start_time
+                    results["timings"]["clone"] = self.timings["clone"]
+            
+            # 2. Collect PR data
+            if "collect" in stages:
+                log_stage("collect", f"Collecting {pr_count} PRs")
+                results["stages_run"].append("collect")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Check if raw data already exists and force is False
+                    raw_repo_dir = self.raw_dir / repo_key
+                    if raw_repo_dir.exists() and not force:
+                        # Check how many PRs we have
+                        index_path = raw_repo_dir / "index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                existing_prs = json.load(f)
+                            logger.info(f"[COLLECT] Found existing data with {len(existing_prs)} PRs. Use --force to re-collect.")
+                            self.timings["collect"] = 0
+                            results["timings"]["collect"] = 0
+                            results["statistics"]["collect"] = {"prs_collected": len(existing_prs)}
+                        else:
+                            logger.warning(f"[COLLECT] Raw directory exists but no index.json found. Re-collecting.")
+                            raw_repo_dir = self.pr_collector.collect_and_save(org, repo, limit=pr_count, filter_merged=True)
+                    else:
+                        # Collect PR data
+                        if raw_repo_dir.exists() and force:
+                            logger.info(f"[COLLECT] Removing existing raw data at {raw_repo_dir}")
+                            import shutil
+                            shutil.rmtree(raw_repo_dir, ignore_errors=True)
+                        
+                        raw_repo_dir = self.pr_collector.collect_and_save(org, repo, limit=pr_count, filter_merged=True)
+                        
+                        # Check if collection was successful
+                        if raw_repo_dir is None or not raw_repo_dir.exists():
+                            error_msg = f"Failed to collect PR data for {org}/{repo}"
+                            logger.error(f"[COLLECT] {error_msg}")
+                            results["errors"].append({"stage": "collect", "error": error_msg})
+                    
+                    # Get statistics if collection succeeded
+                    if raw_repo_dir is not None and raw_repo_dir.exists():
+                        index_path = raw_repo_dir / "index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                collected_prs = json.load(f)
+                            results["statistics"]["collect"] = {"prs_collected": len(collected_prs)}
+                    
+                    self.timings["collect"] = time.time() - start_time
+                    results["timings"]["collect"] = self.timings["collect"]
+            
+            # 2.5 (New) Select high-quality PRs
+            if "select" in stages:
+                log_stage("select", f"Selecting {pr_count} high-quality PRs")
+                results["stages_run"].append("select")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Check if raw data exists first
+                    raw_repo_dir = self.raw_dir / repo_key
+                    if not raw_repo_dir.exists():
+                        error_msg = f"Raw data not found for {org}/{repo}. Run collection first."
+                        logger.error(f"[SELECT] {error_msg}")
+                        results["errors"].append({"stage": "select", "error": error_msg})
+                        self.timings["select"] = time.time() - start_time
+                        results["timings"]["select"] = self.timings["select"]
+                    else:
+                        # Check if selected data already exists and force is False
+                        selected_repo_dir = self.selected_dir / repo_key
+                        if selected_repo_dir.exists() and not force:
+                            # Check how many PRs we have
+                            index_path = selected_repo_dir / "selected_index.json"
+                            if index_path.exists():
+                                with open(index_path, "r") as f:
+                                    existing_prs = json.load(f)
+                                logger.info(f"[SELECT] Found existing selected data with {len(existing_prs)} PRs. Use --force to re-select.")
+                                self.timings["select"] = 0
+                                results["timings"]["select"] = 0
+                                results["statistics"]["select"] = {"prs_selected": len(existing_prs)}
+                            else:
+                                logger.warning(f"[SELECT] Selected directory exists but no index.json found. Re-selecting.")
+                                selected_repo_dir, selected_prs = self.pr_selector.select_quality_prs(org, repo, count=pr_count, initial_sample=pr_count*4)
+                        else:
+                            # Select PRs
+                            if selected_repo_dir.exists() and force:
+                                logger.info(f"[SELECT] Removing existing selected data at {selected_repo_dir}")
+                                import shutil
+                                shutil.rmtree(selected_repo_dir, ignore_errors=True)
+                            
+                            # Select top quality PRs from raw data
+                            # Sample at least 4x the requested count to ensure good quality
+                            initial_sample_size = initial_sample if initial_sample > 0 else pr_count * 4
+                            selected_repo_dir, selected_prs = self.pr_selector.select_quality_prs(org, repo, count=pr_count, initial_sample=initial_sample_size)
+                    
+                    # Check if selected data already exists and force is False
+                    selected_repo_dir = self.selected_dir / repo_key
+                    if selected_repo_dir.exists() and not force:
+                        # Check how many PRs we have
+                        index_path = selected_repo_dir / "selected_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                existing_prs = json.load(f)
+                            logger.info(f"[SELECT] Found existing selected data with {len(existing_prs)} PRs. Use --force to re-select.")
+                            self.timings["select"] = 0
+                            results["timings"]["select"] = 0
+                            results["statistics"]["select"] = {"prs_selected": len(existing_prs)}
+                        else:
+                            logger.warning(f"[SELECT] Selected directory exists but no index.json found. Re-selecting.")
+                            selected_repo_dir, selected_prs = self.pr_selector.select_quality_prs(org, repo, count=pr_count, initial_sample=pr_count*4)
+                    else:
+                        # Select PRs
+                        if selected_repo_dir.exists() and force:
+                            logger.info(f"[SELECT] Removing existing selected data at {selected_repo_dir}")
+                            import shutil
+                            shutil.rmtree(selected_repo_dir, ignore_errors=True)
+                        
+                        # Select top quality PRs from raw data
+                        # Sample at least 4x the requested count to ensure good quality
+                        initial_sample = args.initial_sample if args.initial_sample > 0 else pr_count * 4
+                        selected_repo_dir, selected_prs = self.pr_selector.select_quality_prs(org, repo, count=pr_count, initial_sample=initial_sample)
+                        
+                        # Check if selection was successful
+                        if selected_repo_dir is None or not selected_repo_dir.exists():
+                            error_msg = f"Failed to select PRs for {org}/{repo}"
+                            logger.error(f"[SELECT] {error_msg}")
+                            results["errors"].append({"stage": "select", "error": error_msg})
+                    
+                    # Get statistics if selection succeeded
+                    if selected_repo_dir is not None and selected_repo_dir.exists():
+                        index_path = selected_repo_dir / "selected_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                selected_prs = json.load(f)
+                            
+                            # Get selection metadata
+                            metadata_path = selected_repo_dir / "selection_metadata.json"
+                            if metadata_path.exists():
+                                with open(metadata_path, "r") as f:
+                                    selection_metadata = json.load(f)
+                                
+                                # Add to results
+                                results["statistics"]["select"] = {
+                                    "prs_selected": len(selected_prs),
+                                    "total_prs_found": selection_metadata.get("total_prs_found", 0),
+                                    "prs_scored": selection_metadata.get("prs_scored", 0),
+                                    "average_quality_score": selection_metadata.get("average_quality_score", 0),
+                                    "average_selected_quality": selection_metadata.get("average_selected_quality", 0)
+                                }
+                            else:
+                                results["statistics"]["select"] = {"prs_selected": len(selected_prs)}
+                    
+                    self.timings["select"] = time.time() - start_time
+                    results["timings"]["select"] = self.timings["select"]
+            if "process" in stages:
+                log_stage("process", "Processing PR data")
+                results["stages_run"].append("process")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Check if we should use selected data or raw data
+                    source_dir = self.selected_dir / repo_key
+                    if not source_dir.exists() or "select" not in results["stages_run"]:
+                        # If selection stage wasn't run or didn't produce output, use raw data
+                        source_dir = self.raw_dir / repo_key
+                    
+                    if not source_dir.exists():
+                        error_msg = f"Source data not found for {org}/{repo}. Run collection first."
+                        logger.error(f"[PROCESS] {error_msg}")
+                        results["errors"].append({"stage": "process", "error": error_msg})
+                        self.timings["process"] = time.time() - start_time
+                        results["timings"]["process"] = self.timings["process"]
+                    else:
+                        # Check if processed data already exists and force is False
+                        processed_repo_dir = self.processed_dir / repo_key
+                        if processed_repo_dir.exists() and not force:
+                            # Check how many PRs we have
+                            index_path = processed_repo_dir / "processed_index.json"
+                            if index_path.exists():
+                                with open(index_path, "r") as f:
+                                    existing_prs = json.load(f)
+                                logger.info(f"[PROCESS] Found existing processed data with {len(existing_prs)} PRs. Use --force to re-process.")
+                                self.timings["process"] = 0
+                                results["timings"]["process"] = 0
+                                results["statistics"]["process"] = {"prs_processed": len(existing_prs)}
+                            else:
+                                logger.warning(f"[PROCESS] Processed directory exists but no index.json found. Re-processing.")
+                                processed_repo_dir = self.pr_processor.process_repository(org, repo, source_dir=source_dir)
+                        else:
+                            # Process PR data
+                            if processed_repo_dir.exists() and force:
+                                logger.info(f"[PROCESS] Removing existing processed data at {processed_repo_dir}")
+                                import shutil
+                                shutil.rmtree(processed_repo_dir, ignore_errors=True)
+                            
+                            processed_repo_dir = self.pr_processor.process_repository(org, repo, source_dir=source_dir)
+                    
+                    # Check if processed data already exists and force is False
+                    processed_repo_dir = self.processed_dir / repo_key
+                    if processed_repo_dir.exists() and not force:
+                        # Check how many PRs we have
+                        index_path = processed_repo_dir / "processed_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                existing_prs = json.load(f)
+                            logger.info(f"[PROCESS] Found existing processed data with {len(existing_prs)} PRs. Use --force to re-process.")
+                            self.timings["process"] = 0
+                            results["timings"]["process"] = 0
+                            results["statistics"]["process"] = {"prs_processed": len(existing_prs)}
+                        else:
+                            logger.warning(f"[PROCESS] Processed directory exists but no index.json found. Re-processing.")
+                            processed_repo_dir = self.pr_processor.process_repository(org, repo)
+                    else:
+                        # Process PR data
+                        if processed_repo_dir.exists() and force:
+                            logger.info(f"[PROCESS] Removing existing processed data at {processed_repo_dir}")
+                            import shutil
+                            shutil.rmtree(processed_repo_dir, ignore_errors=True)
+                        
+                        processed_repo_dir = self.pr_processor.process_repository(org, repo)
+                        
+                        # Check if processing was successful
+                        if processed_repo_dir is None or not processed_repo_dir.exists():
+                            error_msg = f"Failed to process PR data for {org}/{repo}"
+                            logger.error(f"[PROCESS] {error_msg}")
+                            results["errors"].append({"stage": "process", "error": error_msg})
+                    
+                    # Get statistics if processing succeeded
+                    if processed_repo_dir is not None and processed_repo_dir.exists():
+                        index_path = processed_repo_dir / "processed_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                processed_prs = json.load(f)
+                            results["statistics"]["process"] = {"prs_processed": len(processed_prs)}
+                    
+                    self.timings["process"] = time.time() - start_time
+                    results["timings"]["process"] = self.timings["process"]
+            
+            # 4. Filter PRs
+            if "filter" in stages:
+                log_stage("filter", "Filtering PRs")
+                results["stages_run"].append("filter")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Check if filtered data already exists and force is False
+                    filtered_repo_dir = self.filtered_dir / repo_key
+                    if filtered_repo_dir.exists() and not force:
+                        # Check how many PRs we have
+                        index_path = filtered_repo_dir / "filtered_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                existing_prs = json.load(f)
+                            logger.info(f"[FILTER] Found existing filtered data with {len(existing_prs)} PRs. Use --force to re-filter.")
+                            self.timings["filter"] = 0
+                            results["timings"]["filter"] = 0
+                            results["statistics"]["filter"] = {"prs_filtered": len(existing_prs)}
+                        else:
+                            logger.warning(f"[FILTER] Filtered directory exists but no index.json found. Re-filtering.")
+                            filtered_repo_dir = self.filter_pipeline.filter_repository(org, repo)
+                    else:
+                        # Filter PR data
+                        if filtered_repo_dir.exists() and force:
+                            logger.info(f"[FILTER] Removing existing filtered data at {filtered_repo_dir}")
+                            import shutil
+                            shutil.rmtree(filtered_repo_dir, ignore_errors=True)
+                        
+                        filtered_repo_dir = self.filter_pipeline.filter_repository(org, repo)
+                        
+                        # Check if filtering was successful
+                        if filtered_repo_dir is None or not filtered_repo_dir.exists():
+                            error_msg = f"Failed to filter PR data for {org}/{repo}"
+                            logger.error(f"[FILTER] {error_msg}")
+                            results["errors"].append({"stage": "filter", "error": error_msg})
+                    
+                    # Get statistics if filtering succeeded
+                    if filtered_repo_dir is not None and filtered_repo_dir.exists():
+                        index_path = filtered_repo_dir / "filtered_index.json"
+                        if index_path.exists():
+                            with open(index_path, "r") as f:
+                                filtered_prs = json.load(f)
+                            
+                            # Get filter metadata
+                            metadata_path = filtered_repo_dir / "filter_metadata.json"
+                            if metadata_path.exists():
+                                with open(metadata_path, "r") as f:
+                                    filter_metadata = json.load(f)
+                                
+                                # Calculate filter statistics
+                                total_prs = len(filter_metadata)
+                                passed_prs = len(filtered_prs)
+                                bot_filtered = sum(1 for meta in filter_metadata if not meta["bot_filter"]["passed"])
+                                size_filtered = sum(1 for meta in filter_metadata 
+                                                  if meta["bot_filter"]["passed"] and not meta["size_filter"]["passed"])
+                                content_filtered = sum(1 for meta in filter_metadata 
+                                                     if meta["bot_filter"]["passed"] and meta["size_filter"]["passed"] 
+                                                     and not meta["content_filter"]["passed"])
+                                
+                                # Add to results
+                                results["statistics"]["filter"] = {
+                                    "prs_filtered": passed_prs,
+                                    "total_prs": total_prs,
+                                    "bot_filtered": bot_filtered,
+                                    "size_filtered": size_filtered,
+                                    "content_filtered": content_filtered,
+                                    "pass_rate": passed_prs / total_prs if total_prs > 0 else 0
+                                }
+                            else:
+                                results["statistics"]["filter"] = {"prs_filtered": len(filtered_prs)}
+                    
+                    self.timings["filter"] = time.time() - start_time
+                    results["timings"]["filter"] = self.timings["filter"]
+            
+            # 5. Analyze results
+            if "analyze" in stages:
+                log_stage("analyze", "Analyzing filtered data")
+                results["stages_run"].append("analyze")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Run the analyzer
+                    metrics = self.analyzer.analyze_repository(org, repo)
+                    
+                    # Add to results
+                    if metrics:
+                        results["statistics"]["analyze"] = {
+                            "avg_quality_score": metrics.get("avg_quality_score", 0),
+                            "data_reduction_ratio": metrics.get("data_reduction_ratio", 0),
+                            "filter_rates": {
+                                "bot": metrics.get("bot_filter_rate", 0),
+                                "size": metrics.get("size_filter_rate", 0),
+                                "content": metrics.get("content_filter_rate", 0)
+                            }
+                        }
+                    else:
+                        error_msg = f"Failed to analyze filtered data for {org}/{repo}"
+                        logger.error(f"[ANALYZE] {error_msg}")
+                        results["errors"].append({"stage": "analyze", "error": error_msg})
+                    
+                    self.timings["analyze"] = time.time() - start_time
+                    results["timings"]["analyze"] = self.timings["analyze"]
+            
+            # 6. Generate report
+            if "report" in stages:
+                log_stage("report", "Generating comprehensive report")
+                results["stages_run"].append("report")
+                
+                if not dry_run:
+                    start_time = time.time()
+                    
+                    # Generate the report
+                    report_path = self.report_generator.generate_report()
+                    
+                    # Add to results
+                    if report_path and report_path.exists():
+                        results["statistics"]["report"] = {
+                            "report_path": str(report_path)
+                        }
+                        logger.info(f"[REPORT] Report generated successfully: {report_path}")
+                    else:
+                        error_msg = f"Failed to generate report for {org}/{repo}"
+                        logger.error(f"[REPORT] {error_msg}")
+                        results["errors"].append({"stage": "report", "error": error_msg})
+                    
+                    self.timings["report"] = time.time() - start_time
+                    results["timings"]["report"] = self.timings["report"]
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"[PIPELINE] {error_msg}")
+            import traceback
+            logger.error(traceback.format_exc())
+            results["errors"].append({"stage": "pipeline", "error": error_msg})
+        
+        # Calculate total time
+        total_time = sum(self.timings.values())
+        results["timings"]["total"] = total_time
+        
+        return results
+
+
+def main():
+    """Run the unified pipeline."""
+    parser = argparse.ArgumentParser(description="Run the unified data curation pipeline")
+    
+    # Repository parameters
+    parser.add_argument("--org", type=str, required=True, help="Repository owner/organization")
+    parser.add_argument("--repo", type=str, required=True, help="Repository name")
+    parser.add_argument("--prs", type=int, default=30, help="Number of PRs to collect (default: 30)")
+    
+    # API keys and configuration
+    parser.add_argument("--github-token", type=str, help="GitHub API token (or set GITHUB_TOKEN env var)")
+    parser.add_argument("--openai-key", type=str, help="OpenAI API key (or set OPENAI_API_KEY env var)")
+    parser.add_argument("--config", type=str, default="config.json", help="Path to configuration file with API keys")
+    
+    # Add optional parameters for PR selection
+    parser.add_argument("--initial-sample", type=int, default=0, 
+                      help="Initial number of PRs to score for selection (default: 4 * --prs)")
+    parser.add_argument("--selection-only", action="store_true", 
+                      help="Stop after selection stage (useful for just finding high-quality PRs)")
+    parser.add_argument("--stages", type=str, default="all", 
+                        help=f"Comma-separated list of stages to run: {','.join(STAGES)} or 'all' (default: 'all')")
+    parser.add_argument("--force", action="store_true", help="Force re-run of stages even if data exists")
+    parser.add_argument("--data-dir", type=str, default="~/gh-data-curator/data", 
+                      help="Base directory for data storage (default: ~/gh-data-curator/data)")
+    parser.add_argument("--dry-run", action="store_true", help="Don't execute commands, just print what would be done")
+    
+    args = parser.parse_args()
+    
+    # Expand data directory path
+    data_dir = Path(args.data_dir).expanduser()
+    
+    # Load configuration from file if it exists
+    config = {}
+    config_path = Path(args.config)
+    if config_path.exists():
+        try:
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            logger.info(f"Loaded configuration from {config_path}")
+        except Exception as e:
+            logger.warning(f"Error loading configuration file: {e}")
+    
+    # Check GitHub token - priority: command line > config file > environment
+    github_token = args.github_token or config.get("github_token") or os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        logger.error("GitHub token not found. Please set GITHUB_TOKEN environment variable, use --github-token, or add to config file")
+        sys.exit(1)
+    
+    # Check OpenAI API key (optional) - same priority
+    openai_api_key = args.openai_key or config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
+    if args.openai_key and not openai_api_key:
+        logger.warning("OpenAI API key requested but not found. LLM-based predictions will be disabled.")
+    
+    # Determine stages to run
+    if args.selection_only:
+        stages_to_run = ["clone", "collect", "select"]
+    elif args.stages.lower() == "all":
+        stages_to_run = STAGES[:-1]  # All except "none"
+    else:
+        stages_to_run = [stage.strip().lower() for stage in args.stages.split(",")]
+        # Validate stages
+        invalid_stages = [stage for stage in stages_to_run if stage not in STAGES]
+        if invalid_stages:
+            logger.error(f"Invalid stages: {', '.join(invalid_stages)}")
+            logger.error(f"Valid stages are: {', '.join(STAGES)}")
+            sys.exit(1)
+    
+    # Initialize pipeline
+    pipeline = Pipeline(data_dir, github_token, openai_api_key)
+    
+    # Print configuration
+    logger.info(f"Pipeline configuration:")
+    logger.info(f"  Repository: {args.org}/{args.repo}")
+    logger.info(f"  PR count: {args.prs}")
+    logger.info(f"  Initial sample: {args.initial_sample if args.initial_sample > 0 else args.prs * 4}")
+    logger.info(f"  Stages: {', '.join(stages_to_run)}")
+    logger.info(f"  Selection only: {args.selection_only}")
+    logger.info(f"  Data directory: {data_dir}")
+    logger.info(f"  Config file: {args.config} ({'found' if Path(args.config).exists() else 'not found'})")
+    logger.info(f"  Force re-run: {args.force}")
+    logger.info(f"  Dry run: {args.dry_run}")
+    logger.info(f"  OpenAI enabled: {bool(openai_api_key)}")
+    
+    # Run pipeline
+    logger.info("Starting pipeline...")
+    start_time = time.time()
+    
+    try:
+        # Skip all processing if "none" is specified
+        if stages_to_run == ["none"]:
+            logger.info("'none' stage specified - skipping all processing")
+            results = {
+                "org": args.org,
+                "repo": args.repo,
+                "pr_count": args.prs,
+                "stages_run": [],
+                "statistics": {},
+                "timings": {},
+                "errors": []
+            }
+        else:
+            results = pipeline.run(
+                org=args.org,
+                repo=args.repo,
+                pr_count=args.prs,
+                stages=stages_to_run,
+                force=args.force,
+                dry_run=args.dry_run
+            )
+        
+        # Calculate and add total time
+        total_time = time.time() - start_time
+        
+        # Print summary
+        logger.info("\n" + "="*50)
+        logger.info(f"Pipeline completed in {total_time:.2f}s")
+        logger.info(f"Stages run: {', '.join(results['stages_run'])}")
+        
+        # Print stage timings
+        for stage in results['stages_run']:
+            if stage in results['timings']:
+                logger.info(f"  {stage.ljust(8)}: {results['timings'][stage]:.2f}s")
+        
+        # Print statistics
+        if "collect" in results["statistics"]:
+            collect_stats = results["statistics"]["collect"]
+            logger.info(f"Collect: {collect_stats.get('prs_collected', 0)} PRs collected")
+        
+        if "select" in results["statistics"]:
+            select_stats = results["statistics"]["select"]
+            logger.info(f"Select: {select_stats.get('prs_selected', 0)} high-quality PRs selected")
+            logger.info(f"  Total PRs found: {select_stats.get('total_prs_found', 0)}")
+            logger.info(f"  Average quality of selected PRs: {select_stats.get('average_selected_quality', 0):.2f}")
+        
+        if "process" in results["statistics"]:
+            process_stats = results["statistics"]["process"]
+            logger.info(f"Process: {process_stats.get('prs_processed', 0)} PRs processed")
+        
+        if "filter" in results["statistics"]:
+            filter_stats = results["statistics"]["filter"]
+            logger.info(f"Filter: {filter_stats.get('prs_filtered', 0)} PRs passed filtering")
+            if "pass_rate" in filter_stats:
+                logger.info(f"  Pass rate: {filter_stats['pass_rate']*100:.1f}%")
+            if "bot_filtered" in filter_stats:
+                logger.info(f"  Bot filtered: {filter_stats['bot_filtered']}")
+                logger.info(f"  Size filtered: {filter_stats['size_filtered']}")
+                logger.info(f"  Content filtered: {filter_stats['content_filtered']}")
+        
+        if "analyze" in results["statistics"]:
+            analyze_stats = results["statistics"]["analyze"]
+            logger.info(f"Analyze: Quality score: {analyze_stats.get('avg_quality_score', 0):.2f}")
+            logger.info(f"  Data reduction: {analyze_stats.get('data_reduction_ratio', 0)*100:.1f}%")
+        
+        if "report" in results["statistics"]:
+            report_stats = results["statistics"]["report"]
+            logger.info(f"Report: Generated at {report_stats.get('report_path', 'N/A')}")
+        
+        # Print errors
+        if results["errors"]:
+            logger.warning(f"Errors occurred during pipeline execution:")
+            for error in results["errors"]:
+                logger.warning(f"  {error['stage'].upper()}: {error['error']}")
+        
+        # Save results to file
+        results_file = data_dir / f"pipeline_results_{args.org}_{args.repo}.json"
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"Results saved to {results_file}")
+        
+        logger.info("="*50)
+        
+    except KeyboardInterrupt:
+        logger.warning("Pipeline interrupted by user.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Pipeline failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

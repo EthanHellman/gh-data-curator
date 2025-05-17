@@ -37,6 +37,8 @@ data/processed/
 *.json
 data/repos/
 temp_check_qfrrfdb0/
+data/
+data_old/
 
 # Jupyter Notebooks
 .ipynb_checkpoints
@@ -51,3 +53,6 @@ logs/
 .vscode/
 *.swp
 *.swo
+
+# Credentials
+config.json
