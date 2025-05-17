@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 PR Analysis Module
@@ -17,9 +16,10 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.manifold import TSNE
-from sklearn.feature_extraction.text import TfidfVectorizer
+from pathlib import Path
 
 from visualization_utils import add_gradient_background, add_gradient_line
+from text_embeddings import get_embeddings_for_pr_texts, get_embeddings_for_pr_code, extract_code_sample
 
 logger = logging.getLogger("enhanced_report_generator")
 
@@ -39,8 +39,8 @@ def add_pr_clustering(generator, pdf):
     intro_text = [
         "This section presents an analysis of PRs using clustering and dimensionality reduction techniques.",
         "The following visualizations show how PRs are distributed in feature space, revealing patterns",
-        "and similarities across repositories. Code embedding and text embedding techniques have been",
-        "used to analyze both the code changes and PR descriptions."
+        "and similarities across repositories. We utilize OpenAI embeddings to analyze both code content",
+        "and PR descriptions, providing deeper insights into the semantic relationships between PRs."
     ]
     
     fig.text(0.1, 0.87, "\n".join(intro_text), 
@@ -57,47 +57,89 @@ def add_pr_clustering(generator, pdf):
     add_text_embedding_visualization(generator, pdf)
 
 def add_code_embedding_visualization(generator, pdf):
-    """Add a visualization of code embeddings using PCA."""
+    """Add a visualization of code embeddings using OpenAI and dimensionality reduction."""
     # Filter data to PRs that have been processed by at least the bot filter
     cluster_data = generator.pr_data[generator.pr_data['passed_bot_filter'] == True].copy()
     
     # Check if we have enough data
     if len(cluster_data) < 10:
-        logger.warning("Not enough data for clustering visualization")
+        logger.warning("Not enough data for code embedding visualization")
         return
     
-    # Select code-specific features for embedding
-    features = [
-        'file_count', 'code_file_count', 'total_changes',
-        'additions', 'deletions', 'size_score', 
-        'complexity_score', 'relevance_score', 
-        'problem_solving_score', 'code_quality_score'
-    ]
+    # Prepare data for embedding
+    try:
+        # Try to find the config file
+        config_path = Path.home() / "gh-data-curator" / "config.json"
+        if not config_path.exists():
+            config_path = Path.cwd().parent / "config.json"
+        if not config_path.exists():
+            config_path = None
+            
+        # Generate code samples for embedding
+        code_samples = []
+        for _, row in cluster_data.iterrows():
+            # Extract code sample from PR data
+            pr_data = {
+                "title": row["title"],
+                "body": row["body"],
+                "additions": row["additions"],
+                "deletions": row["deletions"],
+                "files": row.get("relevant_files", [])
+            }
+            code_sample = extract_code_sample(pr_data)
+            code_samples.append(code_sample)
+        
+        # Get embeddings using OpenAI
+        logger.info(f"Generating code embeddings for {len(code_samples)} PRs using OpenAI")
+        embeddings = get_embeddings_for_pr_code(code_samples, config_path)
+        
+        if len(embeddings) < len(cluster_data):
+            logger.warning(f"Received {len(embeddings)} embeddings for {len(cluster_data)} PRs")
+            # If embeddings are missing, switch to feature-based embedding
+            use_feature_embedding = True
+        else:
+            use_feature_embedding = False
+    except Exception as e:
+        logger.error(f"Error generating code embeddings: {e}")
+        # Fallback to feature-based embedding
+        use_feature_embedding = True
     
-    # Exclude features with missing values
-    valid_features = []
-    for feature in features:
-        if not cluster_data[feature].isnull().any():
-            valid_features.append(feature)
+    # Fallback to feature-based embedding if OpenAI embedding failed
+    if use_feature_embedding:
+        logger.info("Falling back to feature-based embedding")
+        # Select features for code embedding
+        features = [
+            'file_count', 'code_file_count', 'total_changes',
+            'additions', 'deletions', 'size_score', 
+            'complexity_score', 'relevance_score', 
+            'problem_solving_score', 'code_quality_score'
+        ]
+        
+        # Exclude features with missing values
+        valid_features = []
+        for feature in features:
+            if not cluster_data[feature].isnull().any():
+                valid_features.append(feature)
+        
+        # Prepare data for PCA
+        X = cluster_data[valid_features]
+        
+        # Standardize the data
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        embeddings = X_scaled
     
-    # Prepare data for PCA
-    X = cluster_data[valid_features]
-    
-    # Standardize the data
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Apply PCA for dimensionality reduction
+    # Dimensionality reduction
     pca = PCA(n_components=2)
-    X_pca = pca.fit_transform(X_scaled)
+    X_pca = pca.fit_transform(embeddings)
     
     # Apply K-means clustering with silhouette analysis for optimal cluster number
     best_score = -1
     best_n_clusters = 3  # Default
     
-    for n_clusters in range(2, min(6, len(X) // 5 + 1)):
+    for n_clusters in range(2, min(6, len(embeddings) // 5 + 1)):
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(X_scaled)
+        cluster_labels = kmeans.fit_predict(embeddings)
         
         # Simple evaluation based on inertia
         score = -kmeans.inertia_
@@ -108,18 +150,18 @@ def add_code_embedding_visualization(generator, pdf):
     
     # Apply best clustering
     kmeans = KMeans(n_clusters=best_n_clusters, random_state=42, n_init=10)
-    cluster_labels = kmeans.fit_predict(X_scaled)
+    cluster_labels = kmeans.fit_predict(embeddings)
     
     # Create a DataFrame with PCA results and cluster labels
     pca_df = pd.DataFrame({
         'PCA1': X_pca[:, 0],
         'PCA2': X_pca[:, 1],
         'Cluster': cluster_labels,
-        'Repository': cluster_data['repository'],
-        'PR': cluster_data['pr_number'],
-        'Passed': cluster_data['passed_filter'],
-        'Quality': cluster_data['quality_score'],
-        'repo_key': cluster_data['repo_key']
+        'Repository': cluster_data['repository'].values,
+        'PR': cluster_data['pr_number'].values,
+        'Passed': cluster_data['passed_filter'].values,
+        'Quality': cluster_data['quality_score'].values,
+        'repo_key': cluster_data['repo_key'].values
     })
     
     # Create the plot
@@ -160,31 +202,6 @@ def add_code_embedding_visualization(generator, pdf):
             alpha=0.7,
             label='Passed All Filters'
         )
-    
-    # Find top contributing features for each principal component
-    feature_loadings = pd.DataFrame(
-        pca.components_.T,
-        columns=['PC1', 'PC2'],
-        index=valid_features
-    )
-    
-    # Find top contributing features for each principal component
-    pc1_features = feature_loadings.sort_values('PC1', key=abs, ascending=False)['PC1'].head(3)
-    pc2_features = feature_loadings.sort_values('PC2', key=abs, ascending=False)['PC2'].head(3)
-    
-    # Format nice feature names
-    feature_names = {
-        'file_count': 'File Count',
-        'code_file_count': 'Code Files',
-        'total_changes': 'Total Changes',
-        'additions': 'Additions',
-        'deletions': 'Deletions',
-        'size_score': 'Size Score',
-        'complexity_score': 'Complexity Score',
-        'relevance_score': 'Relevance Score',
-        'problem_solving_score': 'Problem Solving',
-        'code_quality_score': 'Code Quality'
-    }
     
     # Create a legend for repositories
     repo_legend_elements = []
@@ -229,23 +246,60 @@ def add_code_embedding_visualization(generator, pdf):
               ncol=len(cluster_legend_elements))
     
     # Enhance chart appearance
-    ax.set_xlabel(f'Principal Component 1 ({pca.explained_variance_ratio_[0]:.1%} variance)', 
-                fontsize=12, weight='bold')
-    ax.set_ylabel(f'Principal Component 2 ({pca.explained_variance_ratio_[1]:.1%} variance)', 
-                fontsize=12, weight='bold')
-    ax.set_title('PR Code Embedding Visualization', fontsize=16, weight='bold', pad=20)
+    if use_feature_embedding:
+        title = 'PR Code Feature Embedding Visualization'
+        variance_explained = [pca.explained_variance_ratio_[0], pca.explained_variance_ratio_[1]]
+        
+        # Get feature importance for explanation
+        if not use_feature_embedding:
+            pc_explanation = "Using OpenAI code embeddings"
+        else:
+            # Find top contributing features for each principal component
+            feature_loadings = pd.DataFrame(
+                pca.components_.T,
+                columns=['PC1', 'PC2'],
+                index=valid_features
+            )
+            
+            # Find top contributing features for each principal component
+            pc1_features = feature_loadings.sort_values('PC1', key=abs, ascending=False)['PC1'].head(3)
+            pc2_features = feature_loadings.sort_values('PC2', key=abs, ascending=False)['PC2'].head(3)
+            
+            # Format nice feature names
+            feature_names = {
+                'file_count': 'File Count',
+                'code_file_count': 'Code Files',
+                'total_changes': 'Total Changes',
+                'additions': 'Additions',
+                'deletions': 'Deletions',
+                'size_score': 'Size Score',
+                'complexity_score': 'Complexity Score',
+                'relevance_score': 'Relevance Score',
+                'problem_solving_score': 'Problem Solving',
+                'code_quality_score': 'Code Quality'
+            }
+            
+            pc1_text = "PC1 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
+                                                 for feat, val in pc1_features.items()])
+            pc2_text = "PC2 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
+                                                 for feat, val in pc2_features.items()])
+            
+            pc_explanation = f"{pc1_text}\n{pc2_text}"
+    else:
+        title = 'PR Code Semantic Embedding Visualization'
+        variance_explained = [None, None]  # Not applicable for OpenAI embeddings
+        pc_explanation = "Using OpenAI code embeddings to capture semantic relationships between PRs"
     
-    # Add text explaining the principal components
-    pc1_text = "PC1 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
-                                         for feat, val in pc1_features.items()])
-    pc2_text = "PC2 reflects: " + ", ".join([f"{feature_names.get(feat, feat)} ({val:.2f})" 
-                                         for feat, val in pc2_features.items()])
+    ax.set_xlabel(f'Dimension 1{" (" + f"{variance_explained[0]:.1%} variance)" if variance_explained[0] else ""}', 
+                fontsize=12, weight='bold')
+    ax.set_ylabel(f'Dimension 2{" (" + f"{variance_explained[1]:.1%} variance)" if variance_explained[1] else ""}', 
+                fontsize=12, weight='bold')
+    ax.set_title(title, fontsize=16, weight='bold', pad=20)
     
     # Add box with component explanations
     explanation_text = (
-        f"{pc1_text}\n"
-        f"{pc2_text}\n\n"
-        "This visualization shows PRs positioned according to their code metrics.\n"
+        f"{pc_explanation}\n\n"
+        "This visualization shows PRs positioned according to their code content.\n"
         "Similar PRs are grouped into clusters, with point size indicating quality score.\n"
         "Edge color represents repository, while black outlines indicate PRs that passed all filters."
     )
@@ -269,7 +323,7 @@ def add_code_embedding_visualization(generator, pdf):
     plt.close(fig)
 
 def add_text_embedding_visualization(generator, pdf):
-    """Add a visualization of PR description embeddings using TF-IDF and dimensionality reduction."""
+    """Add a visualization of PR description embeddings using OpenAI and dimensionality reduction."""
     # Filter data to PRs with non-empty descriptions
     text_data = generator.pr_data[
         (generator.pr_data['passed_bot_filter'] == True) & 
@@ -285,34 +339,60 @@ def add_text_embedding_visualization(generator, pdf):
     # Prepare texts for embedding
     texts = text_data['body'].fillna('').tolist()
     
-    # Create TF-IDF embeddings
-    vectorizer = TfidfVectorizer(
-        max_features=100,  # Limit to top features
-        stop_words='english',
-        min_df=2,  # Ignore terms that appear in fewer than 2 documents
-        max_df=0.9  # Ignore terms that appear in more than 90% of documents
-    )
-    
-    # Transform texts to TF-IDF features
     try:
-        X_tfidf = vectorizer.fit_transform(texts)
-    except ValueError:
-        logger.warning("Could not create text embeddings - not enough textual content")
-        return
+        # Try to find the config file
+        config_path = Path.home() / "gh-data-curator" / "config.json"
+        if not config_path.exists():
+            config_path = Path.cwd().parent / "config.json"
+        if not config_path.exists():
+            config_path = None
+        
+        # Get embeddings using OpenAI
+        logger.info(f"Generating text embeddings for {len(texts)} PR descriptions using OpenAI")
+        embeddings = get_embeddings_for_pr_texts(texts, config_path)
+        
+        if len(embeddings) == 0 or len(embeddings) < len(texts):
+            logger.warning(f"Received {len(embeddings)} embeddings for {len(texts)} texts")
+            raise ValueError("Incomplete embeddings received")
+            
+    except Exception as e:
+        logger.error(f"Error generating text embeddings: {e}")
+        # If OpenAI fails, use TF-IDF as fallback
+        logger.info("Falling back to TF-IDF for text embedding")
+        
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        # Create TF-IDF embeddings
+        vectorizer = TfidfVectorizer(
+            max_features=100,  # Limit to top features
+            stop_words='english',
+            min_df=2,  # Ignore terms that appear in fewer than 2 documents
+            max_df=0.9  # Ignore terms that appear in more than 90% of documents
+        )
+        
+        # Transform texts to TF-IDF features
+        try:
+            embeddings = vectorizer.fit_transform(texts).toarray()
+        except:
+            logger.error("Failed to create TF-IDF embeddings")
+            return
     
-    # Apply dimensionality reduction - use t-SNE for better clustering in 2D
+    # Apply dimensionality reduction
     try:
+        # Try t-SNE first for better clustering
         tsne = TSNE(n_components=2, perplexity=min(30, len(texts)-1), random_state=42)
-        X_tsne = tsne.fit_transform(X_tfidf.toarray())
-    except ValueError:
-        # Fallback to PCA if t-SNE fails
+        X_reduced = tsne.fit_transform(embeddings)
+        method = "t-SNE"
+    except:
+        # Fall back to PCA if t-SNE fails
         pca = PCA(n_components=2)
-        X_tsne = pca.fit_transform(X_tfidf.toarray())
+        X_reduced = pca.fit_transform(embeddings)
+        method = "PCA"
     
     # Create a DataFrame with the results
     embedding_df = pd.DataFrame({
-        'X': X_tsne[:, 0],
-        'Y': X_tsne[:, 1],
+        'X': X_reduced[:, 0],
+        'Y': X_reduced[:, 1],
         'Repository': text_data['repository'].values,
         'PR': text_data['pr_number'].values,
         'Passed': text_data['passed_filter'].values,
@@ -363,27 +443,20 @@ def add_text_embedding_visualization(generator, pdf):
     # Enhance chart appearance
     ax.set_xlabel('Dimension 1', fontsize=12, weight='bold')
     ax.set_ylabel('Dimension 2', fontsize=12, weight='bold')
-    ax.set_title('PR Description Text Embedding', fontsize=16, weight='bold', pad=20)
+    
+    if method == "t-SNE":
+        title = 'PR Description Semantic Embedding (t-SNE)'
+    else:
+        title = 'PR Description Semantic Embedding (PCA)'
+        
+    ax.set_title(title, fontsize=16, weight='bold', pad=20)
     
     # Add explanation
-    # Extract most important terms
-    feature_names = vectorizer.get_feature_names_out()
-    
-    # Get top features from TF-IDF
-    if hasattr(vectorizer, 'idf_'):
-        top_indices = np.argsort(vectorizer.idf_)[:10]
-        top_terms = [feature_names[i] for i in top_indices]
-    else:
-        top_terms = []
-    
     explanation_text = (
-        "This visualization shows PRs positioned according to their textual description content.\n"
-        "PRs with similar descriptions are positioned closer together in the space.\n"
-        "Point size indicates quality score, color indicates repository, and black outlines show PRs passing all filters."
+        f"This visualization uses OpenAI embeddings to show semantic relationships between PR descriptions.\n"
+        f"PRs with similar text content are positioned closer together in the space.\n"
+        f"Point size indicates quality score, color indicates repository, and black outlines show PRs passing all filters."
     )
-    
-    if top_terms:
-        explanation_text += f"\n\nCommon terms across PR descriptions: {', '.join(top_terms)}"
     
     box = FancyBboxPatch((0.05, 0.01), 0.9, 0.1, fill=True, 
                       facecolor='#f8f9fa', alpha=0.9, transform=fig.transFigure, 
