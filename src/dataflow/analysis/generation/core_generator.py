@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""
+Core Report Generator
+
+This module provides the core EnhancedReportGenerator class that coordinates
+the generation of the enhanced report with improved visualizations and organization.
+"""
+import logging
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
+
+# Import the other modules
+from visualization_utils import (
+    set_default_plot_style, 
+    repository_color_palette,
+    adjust_color_brightness,
+    get_quality_color
+)
+from report_sections import (
+    add_cover_page,
+    add_executive_summary,
+    add_cross_repo_comparison,
+    add_repo_section,
+    add_quality_profiles,
+    add_methodology_section
+)
+from pr_analysis import (
+    add_pr_clustering,
+    add_code_embedding_visualization,
+    add_text_embedding_visualization
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("enhanced_report_generator")
+
+class EnhancedReportGenerator:
+    """
+    Generate a comprehensive report on data curation filtering results
+    with enhanced visualizations and clustering analysis.
+    """
+    
+    def __init__(self, data_dir: Path):
+        """
+        Initialize the enhanced report generator.
+        
+        Args:
+            data_dir: Base directory containing filtered PR data
+        """
+        self.data_dir = data_dir
+        self.filtered_dir = data_dir / "filtered"
+        self.results_dir = data_dir / "analysis_results"
+        self.output_dir = data_dir / "reports"
+        self.output_dir.mkdir(exist_ok=True)
+        
+        # Get current timestamp for report naming
+        self.timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        
+        # Set up default styles for better appearance
+        set_default_plot_style()
+        
+        # Create consistent color palettes
+        self.repository_colors = {}
+        
+        # Create figures directory
+        self.figures_dir = self.results_dir / "figures"
+        self.figures_dir.mkdir(exist_ok=True)
+        
+        # Load repository data
+        self.repo_data = self._load_repository_data()
+        self.pr_data = self._load_pr_data()
+    
+    def _load_repository_data(self):
+        """Load repository data from filtered directories."""
+        repo_data = {}
+        
+        for repo_dir in self.filtered_dir.iterdir():
+            if repo_dir.is_dir():
+                repo_key = repo_dir.name
+                metadata_path = repo_dir / "filter_metadata.json"
+                
+                if metadata_path.exists():
+                    with open(metadata_path, "r") as f:
+                        filter_metadata = json.load(f)
+                    
+                    # Load filtered PRs
+                    filtered_index_path = repo_dir / "filtered_index.json"
+                    filtered_prs = []
+                    if filtered_index_path.exists():
+                        with open(filtered_index_path, "r") as f:
+                            filtered_prs = json.load(f)
+                    
+                    # Load metrics if available
+                    metrics_path = self.results_dir / f"{repo_key}_metrics.json"
+                    metrics = {}
+                    if metrics_path.exists():
+                        with open(metrics_path, "r") as f:
+                            metrics = json.load(f)
+                    
+                    repo_data[repo_key] = {
+                        "filter_metadata": filter_metadata,
+                        "filtered_prs": filtered_prs,
+                        "metrics": metrics
+                    }
+        
+        # Assign consistent colors to repositories
+        color_palette = repository_color_palette(len(repo_data))
+        for i, repo_key in enumerate(sorted(repo_data.keys())):
+            self.repository_colors[repo_key] = color_palette[i % len(color_palette)]
+        
+        return repo_data
+    
+    def _load_pr_data(self):
+        """Load PR data into a DataFrame for analysis."""
+        pr_records = []
+        
+        for repo_key, data in self.repo_data.items():
+            for meta in data["filter_metadata"]:
+                # Extract repository name for better display
+                repo_name = repo_key.replace("_", "/")
+                
+                # Extract basic PR info
+                pr_record = {
+                    "repository": repo_name,
+                    "repo_key": repo_key,
+                    "pr_number": meta.get("pr_number", 0),
+                    "title": meta.get("title", ""),
+                    "body": meta.get("body", ""),
+                    "passed_filter": meta.get("passed_filter", False),
+                }
+                
+                # Extract bot filter data
+                bot_filter = meta.get("bot_filter", {})
+                pr_record.update({
+                    "passed_bot_filter": bot_filter.get("passed", False),
+                    "bot_confidence": bot_filter.get("details", {}).get("confidence", 0),
+                })
+                
+                # Extract size filter data
+                size_filter = meta.get("size_filter", {})
+                size_details = size_filter.get("details", {})
+                pr_record.update({
+                    "passed_size_filter": size_filter.get("passed", False),
+                    "file_count": size_details.get("total_files", 0),
+                    "code_file_count": size_details.get("code_file_count", 0),
+                    "total_changes": size_details.get("total_changes", 0),
+                    "additions": size_details.get("additions", 0),
+                    "deletions": size_details.get("deletions", 0),
+                    "size_score": size_details.get("size_score", 0),
+                    "complexity_score": size_details.get("complexity_score", 0),
+                })
+                
+                # Extract content filter data
+                content_filter = meta.get("content_filter", {})
+                content_details = content_filter.get("details", {})
+                pr_record.update({
+                    "passed_content_filter": content_filter.get("passed", False),
+                    "relevance_score": content_details.get("relevance_score", 0),
+                    "problem_solving_score": content_details.get("problem_solving_score", 0),
+                    "code_quality_score": content_details.get("code_quality_score", 0),
+                })
+                
+                # Add overall quality score
+                pr_record["quality_score"] = meta.get("quality_score", 0)
+                
+                # Add relevant files for context
+                pr_record["relevant_files"] = meta.get("relevant_files", [])
+                
+                pr_records.append(pr_record)
+        
+        # Create DataFrame
+        df = pd.DataFrame(pr_records)
+        
+        # Calculate derived metrics for analysis
+        if not df.empty:
+            # Calculate combined quality metric (simplified)
+            df["combined_quality"] = df.apply(
+                lambda row: (row["size_score"] + row["relevance_score"] + row["code_quality_score"]) / 3 
+                if row["passed_bot_filter"] else 0,
+                axis=1
+            )
+        
+        return df
+    
+    def generate_report(self) -> Path:
+        """
+        Generate a comprehensive PDF report with enhanced visualizations.
+        
+        Returns:
+            Path to the generated report
+        """
+        logger.info("Generating enhanced comprehensive filtering report...")
+        
+        # Create output PDF
+        report_path = self.output_dir / f"enhanced_data_curation_report_{self.timestamp}.pdf"
+        
+        with PdfPages(report_path) as pdf:
+            # Cover page
+            add_cover_page(self, pdf)
+            
+            # Executive summary
+            add_executive_summary(self, pdf)
+            
+            # Cross-repository comparison
+            add_cross_repo_comparison(self, pdf)
+            
+            # Add code embedding-based clustering
+            add_code_embedding_visualization(self, pdf)
+            
+            # Add text embedding-based visualization
+            add_text_embedding_visualization(self, pdf)
+            
+            # Individual repository analyses
+            for repo_key in sorted(self.repo_data.keys()):
+                add_repo_section(self, pdf, repo_key)
+            
+            # Add exemplary PR profiles
+            add_quality_profiles(self, pdf)
+            
+            # Methodology
+            add_methodology_section(self, pdf)
+        
+        logger.info(f"Enhanced report generated successfully: {report_path}")
+        return report_path
+    
+    def generate_summary_stats(self):
+        """Generate enhanced summary statistics from repository data."""
+        total_prs = sum(len(data["filter_metadata"]) for data in self.repo_data.values())
+        passed_prs = sum(len(data["filtered_prs"]) for data in self.repo_data.values())
+        
+        # Calculate filter statistics
+        bot_filtered = 0
+        size_filtered = 0
+        content_filtered = 0
+        
+        for data in self.repo_data.values():
+            for meta in data["filter_metadata"]:
+                if not meta.get("bot_filter", {}).get("passed", False):
+                    bot_filtered += 1
+                elif not meta.get("size_filter", {}).get("passed", False):
+                    size_filtered += 1
+                elif not meta.get("content_filter", {}).get("passed", False):
+                    content_filtered += 1
+        
+        # Calculate quality metrics
+        quality_scores = []
+        for data in self.repo_data.values():
+            for meta in data["filter_metadata"]:
+                if meta.get("passed_filter", False):
+                    quality_scores.append(meta.get("quality_score", 0))
+        
+        avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0
+        
+        # Calculate repository-specific stats
+        repo_stats = {}
+        for repo_key, data in self.repo_data.items():
+            repo_filtered_prs = len(data["filtered_prs"])
+            repo_total_prs = len(data["filter_metadata"])
+            repo_pass_rate = repo_filtered_prs / repo_total_prs if repo_total_prs > 0 else 0
+            
+            repo_quality_scores = [
+                meta.get("quality_score", 0) 
+                for meta in data["filter_metadata"] 
+                if meta.get("passed_filter", False)
+            ]
+            repo_avg_quality = sum(repo_quality_scores) / len(repo_quality_scores) if repo_quality_scores else 0
+            
+            # Count PRs filtered at each stage
+            repo_bot_filtered = sum(1 for meta in data["filter_metadata"] 
+                               if not meta.get("bot_filter", {}).get("passed", False))
+            repo_size_filtered = sum(1 for meta in data["filter_metadata"] 
+                                 if meta.get("bot_filter", {}).get("passed", False)
+                                 and not meta.get("size_filter", {}).get("passed", False))
+            repo_content_filtered = sum(1 for meta in data["filter_metadata"] 
+                                    if meta.get("bot_filter", {}).get("passed", False) 
+                                    and meta.get("size_filter", {}).get("passed", False)
+                                    and not meta.get("content_filter", {}).get("passed", False))
+            
+            repo_stats[repo_key] = {
+                "total_prs": repo_total_prs,
+                "passed_prs": repo_filtered_prs,
+                "pass_rate": repo_pass_rate,
+                "avg_quality": repo_avg_quality,
+                "bot_filtered": repo_bot_filtered,
+                "size_filtered": repo_size_filtered,
+                "content_filtered": repo_content_filtered,
+                "bot_filtered_pct": repo_bot_filtered / repo_total_prs if repo_total_prs > 0 else 0,
+                "size_filtered_pct": repo_size_filtered / repo_total_prs if repo_total_prs > 0 else 0,
+                "content_filtered_pct": repo_content_filtered / repo_total_prs if repo_total_prs > 0 else 0
+            }
+        
+        return {
+            "total_prs": total_prs,
+            "passed_prs": passed_prs,
+            "pass_rate": passed_prs / total_prs if total_prs > 0 else 0,
+            "data_reduction": 1 - (passed_prs / total_prs if total_prs > 0 else 0),
+            "bot_filtered": bot_filtered,
+            "size_filtered": size_filtered,
+            "content_filtered": content_filtered,
+            "bot_filtered_pct": bot_filtered / total_prs if total_prs > 0 else 0,
+            "size_filtered_pct": size_filtered / total_prs if total_prs > 0 else 0, 
+            "content_filtered_pct": content_filtered / total_prs if total_prs > 0 else 0,
+            "avg_quality": avg_quality,
+            "repo_stats": repo_stats
+        }
